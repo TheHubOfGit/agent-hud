@@ -1,0 +1,13 @@
+{
+  "name": "mac-agent-bridge",
+  "version": "1.1.0",
+  "description": "High-frequency local telemetry, CodexBar quota, voice STT, and two-way reply bridge for Pixel Watch 3 Agent HUD",
+  "type": "module",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

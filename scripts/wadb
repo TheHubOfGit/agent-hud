@@ -1,0 +1,19 @@
+#!/bin/bash
+# adb for the Pixel Watch 3 only. Finds the watch by model (never the phone that's also on adb),
+# preferring USB over the paired Wi-Fi (TLS) connection. Override with WATCH_SERIAL.
+# Usage: scripts/wadb shell ...
+pick() {
+  # `adb devices -l` lines: "<serial>   device product:... model:Pixel_Watch_3 ...". Wi-Fi serials
+  # can contain spaces (e.g. "adb-XXXX-abc (2)._adb-tls-connect._tcp"), so cut at " device ".
+  adb devices -l | grep -E "[[:space:]]device[[:space:]].*model:Pixel_Watch_3" | grep -v "$1" | head -1 \
+    | sed -E 's/[[:space:]]+device[[:space:]].*//'
+}
+if [ -n "${WATCH_SERIAL:-}" ]; then exec adb -s "$WATCH_SERIAL" "$@"; fi
+SERIAL="$(adb devices -l | grep -E "[[:space:]]device[[:space:]].*model:Pixel_Watch_3" | grep -v "_adb-tls-connect" | head -1 | sed -E 's/[[:space:]]+device[[:space:]].*//')"
+[ -z "$SERIAL" ] && SERIAL="$(pick "^$")"
+if [ -z "$SERIAL" ]; then
+  adb mdns services >/dev/null 2>&1; sleep 2   # nudge mDNS discovery, then retry once
+  SERIAL="$(pick "^$")"
+fi
+[ -z "$SERIAL" ] && { echo "Pixel Watch not reachable over USB or Wi-Fi ADB" >&2; exit 1; }
+exec adb -s "$SERIAL" "$@"

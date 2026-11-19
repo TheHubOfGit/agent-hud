@@ -1,0 +1,16 @@
+airplane_mode_on=0
+mobile_data=0
+bluetooth_on=1
+wifi_on=1
+ntp_server=null
+auto_time=1
+private_dns_mode=null
+private_dns_specifier=null
+sim=LOADED
+operator=Google Fi
+backup=Backup Manager currently enabled
+package:com.google.android.wearable.setupwizard
+package:com.google.android.wearable.setupwizard.overlay.wearmaterial.pixelwatch
+package:com.google.android.wearable.setupwizard.overlay.pixel.watch
+package:com.android.vending
+com.google.android.wearable.sysui

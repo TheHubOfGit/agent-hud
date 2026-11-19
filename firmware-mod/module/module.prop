@@ -1,0 +1,6 @@
+id=pixel_watch_agent_hud
+name=Pixel Watch 3 AI Agent HUD Appliance
+version=v1.0.0
+versionCode=100
+author=Michael Brancazio
+description=Turns Pixel Watch 3 (selene) into a standalone, phone-free, always-on AI Agent & CodexBar Quota HUD with 65% dock battery charge cap and high-frequency Wi-Fi tuning.

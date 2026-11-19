@@ -1,0 +1,35 @@
+# Build outputs
+watch-hud/app/build/
+watch-hud/build/
+watch-hud/.gradle/
+watch-hud/.kotlin/
+watch-hud/local.properties
+watch-hud/captures/
+*.apk
+*.aab
+mac-app/.build/
+mac-app/build/
+mac-app/Resources/AppIcon.iconset/
+firmware-mod/out/
+
+# Dependencies and large assets
+mac-agent-bridge/node_modules/
+mac-agent-bridge/models/
+*.bin
+
+# Machine-specific / private
+firmware-mod/module/adbkey.pub
+.env
+.env.*
+*.pem
+*.p12
+*.keystore
+*.jks
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.iml
+*.log
+mac-agent-bridge/swift/transcribe

@@ -1,0 +1,7 @@
+package:com.google.android.wearable.setupwizard
+package:com.google.omadm.trigger
+package:com.android.omadm.service
+package:com.android.sdm.plugins.connmo
+package:com.google.android.gms.supervision
+package:com.android.sdm.plugins.dcmo
+package:com.android.sdm.plugins.diagmon
