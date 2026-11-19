@@ -1,5 +1,9 @@
 # Agent HUD
 
+![Agent HUD on a Pixel Watch 3, docked on a desk](docs/hero.jpg)
+
+<sub>Concept render of the watch on a desk dock; the screen is a real capture from the app.</sub>
+
 A Pixel Watch 3 that sits on your desk and shows what your AI coding agents are doing, so you can glance over instead of switching windows. It tracks **Claude** (Claude Code and Claude Desktop), **Codex**, **Antigravity** and **T3 Code**, plus your plan quotas from CodexBar, and lets you act from the watch: approve, deny, tap an answer to a question, or reply by voice.
 
 Three pieces:
@@ -10,6 +14,18 @@ Three pieces:
 | `mac-agent-bridge/` | A small Node service on your Mac. Watches each agent's local session files and databases and streams one live snapshot to the watch over Wi-Fi. |
 | `mac-app/` | **Agent HUD.app**, a menu bar app that runs and supervises the bridge, with a dashboard. |
 | `firmware-mod/` | Experimental root/flash tooling and a no-root de-Google script. See the warning below. |
+
+## Screenshots
+
+Captured on the watch (408 × 408).
+
+| Pulse | Orbit | Quotas |
+|:---:|:---:|:---:|
+| <img src="docs/screenshots/pulse.png" width="220" alt="Pulse home: four agents working"> | <img src="docs/screenshots/orbit.png" width="220" alt="Orbit home"> | <img src="docs/screenshots/quotas.png" width="220" alt="Plan quotas with pace markers"> |
+| **Question** | **Agent** | **Controls** |
+| <img src="docs/screenshots/question.png" width="220" alt="A multiple-choice question from Codex"> | <img src="docs/screenshots/agent.png" width="220" alt="An agent's screen with Speak"> | <img src="docs/screenshots/controls.png" width="220" alt="Controls"> |
+| **Listening** | **Review** | **Sent** |
+| <img src="docs/screenshots/voice-listening.png" width="220" alt="Recording a voice reply"> | <img src="docs/screenshots/voice-review.png" width="220" alt="Reviewing the transcribed reply"> | <img src="docs/screenshots/voice-sent.png" width="220" alt="Reply sent to Codex"> |
 
 ## On the watch
 
