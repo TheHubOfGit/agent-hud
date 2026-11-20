@@ -27,12 +27,14 @@ import com.agenthud.watch.data.BridgeClient
 import com.agenthud.watch.data.PrefsStore
 import com.agenthud.watch.service.HapticsEngine
 import com.agenthud.watch.service.HudForegroundService
+import com.agenthud.watch.service.WifiRequester
 import com.agenthud.watch.ui.HudRoot
 
 class MainActivity : ComponentActivity() {
     private lateinit var prefs: PrefsStore
     private lateinit var bridge: BridgeClient
     private lateinit var haptics: HapticsEngine
+    private lateinit var wifi: WifiRequester
     private val voiceRecorder = VoiceRecorder()
 
     private var batteryPct by mutableIntStateOf(65)
@@ -75,6 +77,7 @@ class MainActivity : ComponentActivity() {
         screenMode = prefs.screenMode
         haptics = HapticsEngine(this)
         bridge = BridgeClient(applicationContext, prefs)
+        wifi = WifiRequester(applicationContext) { bridge.reconnectIfDown() }
 
         // Fullscreen immersive appliance mode (hide system bars & status overlays)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -192,6 +195,36 @@ class MainActivity : ComponentActivity() {
         ) {
             updateScreenKeepOn()
         }
+    }
+
+    // Wi-Fi is requested only while the HUD is on screen and the display is awake (see WifiRequester).
+    // Screen-off on this watch is ambient mode: the activity stays resumed, so onStop alone never
+    // fires. The screen on/off broadcasts cover that case.
+    private var started = false
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = updateWifiRequest()
+    }
+
+    private fun updateWifiRequest() {
+        val awake = (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+        if (started && awake) wifi.acquire() else wifi.release()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        started = true
+        registerReceiver(screenReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+        })
+        updateWifiRequest()
+    }
+
+    override fun onStop() {
+        started = false
+        runCatching { unregisterReceiver(screenReceiver) }
+        wifi.release()
+        super.onStop()
     }
 
     override fun onDestroy() {

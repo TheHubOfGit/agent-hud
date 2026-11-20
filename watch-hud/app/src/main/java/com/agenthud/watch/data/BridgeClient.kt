@@ -94,6 +94,12 @@ class BridgeClient(
         }
     }
 
+    /** Wi-Fi just came up: reconnect at once unless already live (no blip when it already is). */
+    fun reconnectIfDown() {
+        if (stopped || _connectionState.value == ConnectionState.CONNECTED) return
+        forceReconnect()
+    }
+
     fun setManualEndpoint(host: String, port: Int = prefs.cachedPort) {
         activeHost = host.trim()
         activePort = port
