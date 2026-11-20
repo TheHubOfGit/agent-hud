@@ -27,7 +27,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Optimized, non-debuggable build: Compose runs 2-3x faster than in a debug build.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed with the local debug key so it installs over the debug build.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
@@ -59,4 +63,6 @@ dependencies {
     implementation("androidx.wear.compose:compose-foundation:1.4.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Installs the Compose libraries' baseline profiles, so their code is precompiled on install.
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
 }

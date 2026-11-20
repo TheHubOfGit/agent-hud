@@ -35,7 +35,19 @@ class HudForegroundService : Service() {
             .setContentText("Live Mac telemetry link active")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
-        startForeground(101, notification)
+        // If the system refuses (or later times out) the foreground service, stop quietly: the HUD
+        // itself keeps running, and a crash here used to take the whole app down.
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34) {
+                startForeground(101, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(101, notification)
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("AgentHUD", "Foreground service not started: ${t.message}")
+            stopSelf()
+            return
+        }
 
         // Hold low-latency Wi-Fi lock + partial wake lock so Wear OS never suspends the WebSocket
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -55,6 +67,12 @@ class HudForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
+
+    // Called when a time-limited foreground service runs out of time. Stopping here is what the
+    // system expects; not stopping is what crashed the app at 5 AM.
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopSelf()
+    }
 
     override fun onDestroy() {
         handler.removeCallbacks(adbWifiTick)

@@ -62,9 +62,13 @@ Check the bridge: `curl http://127.0.0.1:8765/health`
 
 ```bash
 cd watch-hud
-./gradlew assembleDebug
-../scripts/wadb install -r app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease
+../scripts/wadb install -r app/build/outputs/apk/release/app-release.apk
 ```
+
+Install the release build: it's optimized and runs noticeably smoother than the debug build (`assembleDebug`). Both are signed with the local debug key, so either installs over the other.
+
+The Android build tools need JDK 17 or 21. If your default Java is newer, point Gradle at Android Studio's bundled JDK first: `export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"`.
 
 The build bakes in the bridge's auth token from `~/.agenthud-bridge-token` (created by the bridge on first run). The watch finds the Mac over Bonjour (`_agenthud._tcp`) on the same Wi-Fi network.
 

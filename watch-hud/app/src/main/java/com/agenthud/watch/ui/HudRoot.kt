@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.focusable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.focus.FocusRequester
@@ -21,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -83,6 +85,7 @@ fun HudRoot(
     var showControls by remember { mutableStateOf(false) }
     var showVibration by remember { mutableStateOf(false) }
     var quotaRings by remember { mutableStateOf(prefs.quotaRings) }
+    var verticalPages by remember { mutableStateOf(prefs.verticalPages) }
 
     var voiceState by remember { mutableStateOf<VoiceUiState>(VoiceUiState.Hidden) }
     var voiceTargetThread by remember { mutableStateOf<AgentThread?>(null) }
@@ -111,13 +114,17 @@ fun HudRoot(
         }
     }
 
-    // Pager layout:
-    // Page 0 = Quotas (Swipe Left from Home)
-    // Page 1 = Home (Center default)
-    // Page 2..(1 + N) = Individual Agent Focus screens (Swipe Right from Home)
+    // Pager layout.
+    // Side (default):  0 = Quotas, 1 = Home, 2.. = one page per agent (left to right).
+    // Vertical:        0 = Controls, 1 = Quotas, 2 = Home, 3.. = agents (top to bottom).
+    val controlsPage = if (verticalPages) 0 else -1
+    val quotaPage = if (verticalPages) 1 else 0
+    val homePage = quotaPage + 1
+    val agentBase = homePage + 1
     val threadCount = snapshot.threads.size.coerceAtLeast(1)
-    val totalPages = 2 + threadCount
-    val pagerState = rememberPagerState(initialPage = 1, pageCount = { totalPages })
+    val totalPages = agentBase + threadCount
+    // A fresh pager (starting on Home) whenever the layout changes.
+    val pagerState = key(verticalPages) { rememberPagerState(initialPage = homePage, pageCount = { totalPages }) }
 
     // Keep an agent page pinned to the same thread when the bridge reorders the list,
     // so the screen never flips to a different agent under the viewer.
@@ -125,13 +132,13 @@ fun HudRoot(
     val threadIds = snapshot.threads.map { it.id }
     val latestThreadIds by rememberUpdatedState(threadIds)
     LaunchedEffect(pagerState.settledPage) {
-        viewedThreadId = latestThreadIds.getOrNull(pagerState.settledPage - 2)
+        viewedThreadId = latestThreadIds.getOrNull(pagerState.settledPage - agentBase)
     }
     LaunchedEffect(threadIds) {
         val id = viewedThreadId ?: return@LaunchedEffect
         val idx = threadIds.indexOf(id)
-        if (idx >= 0 && pagerState.currentPage >= 2 && pagerState.currentPage != 2 + idx && !pagerState.isScrollInProgress) {
-            pagerState.scrollToPage(2 + idx)
+        if (idx >= 0 && pagerState.currentPage >= agentBase && pagerState.currentPage != agentBase + idx && !pagerState.isScrollInProgress) {
+            pagerState.scrollToPage(agentBase + idx)
         }
     }
 
@@ -157,7 +164,7 @@ fun HudRoot(
                 onWakeScreen()
                 if (!isMuted) haptics.buzzApproval()
                 if (targetIdx >= 0) {
-                    pagerState.animateScrollToPage(2 + targetIdx)
+                    pagerState.animateScrollToPage(agentBase + targetIdx)
                 }
             } else if (queue.size > lastApprovalQueueSize) {
                 // A 2nd/3rd approval arrived while 1st is still pending:
@@ -167,14 +174,14 @@ fun HudRoot(
         } else if (lastFirstApprovalId != null) {
             // Queue cleared cleanly! Soft confirmation & return Home
             if (!isMuted) haptics.buzzCleared()
-            pagerState.animateScrollToPage(1)
+            pagerState.animateScrollToPage(homePage)
         } else if (snapshot.errorCount > lastErrorCount) {
             // New build/agent error
             nightMode = false
             onWakeScreen()
             if (!isMuted) haptics.buzzError()
             val errIdx = snapshot.threads.indexOfFirst { it.isError }
-            if (errIdx >= 0) pagerState.animateScrollToPage(2 + errIdx)
+            if (errIdx >= 0) pagerState.animateScrollToPage(agentBase + errIdx)
         }
 
         lastFirstApprovalId = firstId
@@ -215,7 +222,7 @@ fun HudRoot(
         showControls = false
         showVibration = false
         doneAlertThread = null
-        if (pagerState.currentPage != 1) pagerState.animateScrollToPage(1)
+        if (pagerState.currentPage != homePage) pagerState.animateScrollToPage(homePage)
     }
 
     // "Agent started": a thread goes from idle (or not yet seen) to running. The first snapshot
@@ -251,7 +258,7 @@ fun HudRoot(
 
     // Refresh CodexBar quotas whenever user swipes left to Quotas page
     LaunchedEffect(pagerState.currentPage) {
-        if (pagerState.currentPage == 0) {
+        if (pagerState.currentPage == quotaPage) {
             bridge.requestQuotaRefresh()
         }
     }
@@ -299,6 +306,76 @@ fun HudRoot(
         runCatching { crownFocus.requestFocus() }
     }
 
+    // Controls: a pop-up in the side layout, the top page in the vertical layout.
+    val controlsContent: @Composable (Boolean, Boolean) -> Unit = { asPage, pageActive ->
+        QuickControlsOverlay(
+            vibrationLabel = VIBRATION_STRENGTHS[prefs.hapticStrength],
+            quotaRings = quotaRings,
+            screenModeLabel = screenModeLabel,
+            onCycleScreenMode = onCycleScreenMode,
+            onOpenWatchFace = {
+                showControls = false
+                onOpenWatchFace()
+            },
+            onOpenWatchSettings = {
+                showControls = false
+                onOpenWatchSettings()
+            },
+            onOpenWatchApps = {
+                showControls = false
+                onOpenWatchApps()
+            },
+            onToggleQuotaStyle = {
+                quotaRings = !quotaRings
+                prefs.quotaRings = quotaRings
+                haptics.tapTick()
+            },
+            onOpenVibration = { showVibration = true },
+            currentLayout = currentLayout,
+            nightMode = nightMode,
+            isMuted = System.currentTimeMillis() < mutedUntilMs,
+            brightnessLevel = brightnessLevel,
+            batteryPct = batteryPct,
+            batteryTempC = batteryTempC,
+            onSelectLayout = {
+                currentLayout = it
+                prefs.homeLayout = it
+                haptics.tapTick()
+            },
+            onToggleNight = {
+                nightMode = !nightMode
+                prefs.nightMode = nightMode
+                onApplyBrightness(if (nightMode) 0.12f else brightnessLevel)
+                showControls = false
+            },
+            onToggleMute = {
+                val now = System.currentTimeMillis()
+                mutedUntilMs = if (now < mutedUntilMs) 0L else now + 30 * 60_000L
+                prefs.mutedUntilMs = mutedUntilMs
+            },
+            onCycleBrightness = {
+                brightnessLevel = when {
+                    brightnessLevel < 0.4f -> 0.55f
+                    brightnessLevel < 0.75f -> 0.90f
+                    else -> 0.30f
+                }
+                prefs.brightnessLevel = brightnessLevel
+                if (!nightMode) onApplyBrightness(brightnessLevel)
+            },
+            onReconnect = { bridge.forceReconnect() },
+            onDismiss = { if (asPage) scope.launch { pagerState.animateScrollToPage(homePage) } else showControls = false },
+            verticalPages = verticalPages,
+            onTogglePages = {
+                verticalPages = !verticalPages
+                prefs.verticalPages = verticalPages
+                showControls = false
+                haptics.tapTick()
+            },
+            asPage = asPage,
+            pageActive = pageActive
+        )
+    }
+
     // Root container with OLED shift, swipe-down controls, and rotary crown support
     val (dx, dy) = if (screenHeldOn && !nightMode) dockOffsets[dockShiftIdx] else (0 to 0)
 
@@ -314,7 +391,9 @@ fun HudRoot(
             }
             .focusRequester(crownFocus)
             .focusable()
-            .pointerInput(Unit) {
+            .pointerInput(verticalPages) {
+                // Swipe down opens Controls in the side layout; in the vertical layout it pages.
+                if (verticalPages) return@pointerInput
                 var totalDragY = 0f
                 detectVerticalDragGestures(
                     onDragStart = { totalDragY = 0f },
@@ -371,64 +450,8 @@ fun HudRoot(
                     )
                 }
 
-                showControls -> {
-                    QuickControlsOverlay(
-                        vibrationLabel = VIBRATION_STRENGTHS[prefs.hapticStrength],
-                        quotaRings = quotaRings,
-                        screenModeLabel = screenModeLabel,
-                        onCycleScreenMode = onCycleScreenMode,
-                        onOpenWatchFace = {
-                            showControls = false
-                            onOpenWatchFace()
-                        },
-                        onOpenWatchSettings = {
-                            showControls = false
-                            onOpenWatchSettings()
-                        },
-                        onOpenWatchApps = {
-                            showControls = false
-                            onOpenWatchApps()
-                        },
-                        onToggleQuotaStyle = {
-                            quotaRings = !quotaRings
-                            prefs.quotaRings = quotaRings
-                            haptics.tapTick()
-                        },
-                        onOpenVibration = { showVibration = true },
-                        currentLayout = currentLayout,
-                        nightMode = nightMode,
-                        isMuted = System.currentTimeMillis() < mutedUntilMs,
-                        brightnessLevel = brightnessLevel,
-                        batteryPct = batteryPct,
-                        batteryTempC = batteryTempC,
-                        onSelectLayout = {
-                            currentLayout = it
-                            prefs.homeLayout = it
-                            haptics.tapTick()
-                        },
-                        onToggleNight = {
-                            nightMode = !nightMode
-                            prefs.nightMode = nightMode
-                            onApplyBrightness(if (nightMode) 0.12f else brightnessLevel)
-                            showControls = false
-                        },
-                        onToggleMute = {
-                            val now = System.currentTimeMillis()
-                            mutedUntilMs = if (now < mutedUntilMs) 0L else now + 30 * 60_000L
-                            prefs.mutedUntilMs = mutedUntilMs
-                        },
-                        onCycleBrightness = {
-                            brightnessLevel = when {
-                                brightnessLevel < 0.4f -> 0.55f
-                                brightnessLevel < 0.75f -> 0.90f
-                                else -> 0.30f
-                            }
-                            prefs.brightnessLevel = brightnessLevel
-                            if (!nightMode) onApplyBrightness(brightnessLevel)
-                        },
-                        onReconnect = { bridge.forceReconnect() },
-                        onDismiss = { showControls = false }
-                    )
+                showControls && !verticalPages -> {
+                    controlsContent(false, true)
                 }
 
                 doneAlertThread != null && !hasPendingApproval -> {
@@ -439,7 +462,7 @@ fun HudRoot(
                         onOpen = {
                             doneAlertThread = null
                             val idx = snapshot.threads.indexOfFirst { it.id == t.id }
-                            if (idx >= 0) scope.launch { pagerState.scrollToPage(2 + idx) }
+                            if (idx >= 0) scope.launch { pagerState.scrollToPage(agentBase + idx) }
                         },
                         onDismiss = { doneAlertThread = null }
                     )
@@ -483,30 +506,28 @@ fun HudRoot(
                         }
                         onDispose { crownRouter.pager = null }
                     }
-                    HorizontalPager(
-                        state = pagerState,
-                        modifier = Modifier.fillMaxSize()
-                    ) { page ->
+                    val pageContent: @Composable (Int) -> Unit = { page ->
                         when (page) {
-                            0 -> QuotasTile(
+                            controlsPage -> controlsContent(true, pagerState.settledPage == controlsPage)
+                            quotaPage -> QuotasTile(
                                 rings = quotaRings,
                                 quotas = snapshot.quotas,
                                 nowMs = nowMs,
                                 onRefresh = { bridge.requestQuotaRefresh() }
                             )
-                            1 -> HomeTile(
+                            homePage -> HomeTile(
                                 layout = currentLayout,
                                 snapshot = snapshot,
                                 clockText = clockText,
                                 batteryPct = batteryPct,
                                 onSelectThread = { idx ->
                                     scope.launch {
-                                        pagerState.animateScrollToPage((2 + idx).coerceAtMost(totalPages - 1))
+                                        pagerState.animateScrollToPage((agentBase + idx).coerceAtMost(totalPages - 1))
                                     }
                                 }
                             )
                             else -> {
-                                val threadIdx = page - 2
+                                val threadIdx = page - agentBase
                                 val thread = snapshot.threads.getOrNull(threadIdx)
                                 val moreWaiting = if (thread != null && snapshot.approvalQueue.firstOrNull() == thread.id) {
                                     (snapshot.approvalQueue.size - 1).coerceAtLeast(0)
@@ -553,13 +574,18 @@ fun HudRoot(
                             }
                         }
                     }
+                    if (verticalPages) {
+                        VerticalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page -> pageContent(page) }
+                    } else {
+                        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page -> pageContent(page) }
+                    }
                 }
             }
         }
 
         // Glowing circular perimeter edge-flash overlay whenever an approval or error is active
         // Not on the Orbit/Pulse home page: there the waiting agent's own aurora is the signal.
-        val homeHasOwnSignal = pagerState.currentPage == 1 && currentLayout != HomeLayout.ZEN &&
+        val homeHasOwnSignal = pagerState.currentPage == homePage && currentLayout != HomeLayout.ZEN &&
             !showControls && !showVibration && doneAlertThread == null
         if ((hasPendingApproval || hasError) && voiceState is VoiceUiState.Hidden && !homeHasOwnSignal) {
             PerimeterEdgeFlash(color = if (hasPendingApproval) ColorAmber else ColorRed)

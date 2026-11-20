@@ -64,7 +64,12 @@ fun QuickControlsOverlay(
     onToggleMute: () -> Unit,
     onCycleBrightness: () -> Unit,
     onReconnect: () -> Unit,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    verticalPages: Boolean = false,
+    onTogglePages: () -> Unit = {},
+    /** Shown as a page of the vertical pager rather than as a pop-up over the HUD. */
+    asPage: Boolean = false,
+    pageActive: Boolean = true
 ) {
     Box(
         modifier = Modifier
@@ -73,7 +78,8 @@ fun QuickControlsOverlay(
         contentAlignment = Alignment.Center
     ) {
         val controlsScroll = rememberScrollState()
-        CrownTarget(controlsScroll, modal = true)
+        // As a pop-up the crown only scrolls it; as a page it scrolls, then moves to the next page.
+        CrownTarget(controlsScroll, active = !asPage || pageActive, modal = !asPage)
         // Generous circular safe margins so cards never clip the round screen edge
         Column(
             modifier = Modifier
@@ -185,6 +191,21 @@ fun QuickControlsOverlay(
             ) {
                 Text(text = "Quota view", fontSize = 12.sp, color = Color(0xFFDADCE0), fontWeight = FontWeight.Medium)
                 Text(text = if (quotaRings) "Rings" else "Bars", fontSize = 11.sp, color = ColorBlue)
+            }
+
+            // Page layout: side to side (default) or vertical (Controls, Quotas, Home, agents).
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF16181C))
+                    .clickable { onTogglePages() }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Pages", fontSize = 12.sp, color = Color(0xFFDADCE0), fontWeight = FontWeight.Medium)
+                Text(text = if (verticalPages) "Vertical" else "Side", fontSize = 11.sp, color = ColorBlue)
             }
 
             // Opens the full Vibration settings screen.

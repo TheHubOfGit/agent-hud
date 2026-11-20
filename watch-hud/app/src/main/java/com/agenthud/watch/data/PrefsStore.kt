@@ -49,6 +49,14 @@ class PrefsStore(context: Context) {
         get() = prefs.getBoolean("quota_rings", false)
         set(value) = prefs.edit().putBoolean("quota_rings", value).apply()
 
+    /**
+     * Page layout: false = side to side (Quotas left of Home, agents to the right; default),
+     * true = vertical (Controls, Quotas, Home, then agents, top to bottom).
+     */
+    var verticalPages: Boolean
+        get() = prefs.getBoolean("vertical_pages", false)
+        set(value) = prefs.edit().putBoolean("vertical_pages", value).apply()
+
     // ---- Vibration & alerts ----
     /** Show a full-screen "done" card (and wake the screen) when an agent finishes its turn. */
     var doneAlert: Boolean
