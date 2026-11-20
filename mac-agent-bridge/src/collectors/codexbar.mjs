@@ -109,7 +109,20 @@ export class CodexBarCollector {
 
       if (this.quotas.length === 0 && latest.size > 0) {
         const byProv = new Map();
+        // Shorter window first, whichever one the provider calls primary.
+        const pairs = new Map();
         for (const row of latest.values()) {
+          const p = row.provider.toLowerCase();
+          pairs.set(p, [...(pairs.get(p) || []), row]);
+        }
+        for (const rows of pairs.values()) {
+          if (rows.length === 2 && rows.every(r => r.windowMinutes)) {
+            rows.sort((a, b) => a.windowMinutes - b.windowMinutes);
+            rows[0] = { ...rows[0], windowKind: 'primary' };
+            rows[1] = { ...rows[1], windowKind: 'secondary' };
+          }
+        }
+        for (const row of [...pairs.values()].flat()) {
           const p = row.provider.toLowerCase();
           const cur = byProv.get(p) || { id: p, name: DISPLAY_NAMES[p] || p, color: PROVIDER_COLORS[p] || '#8ab4f8' };
           const rem = Math.max(0, Math.min(100, Math.round(100 - row.usedPercent)));
@@ -166,9 +179,13 @@ export class CodexBarCollector {
         for (const entry of list) {
           if (entry.error || !entry.usage || !entry.usage.primary) continue;
           const p = String(entry.provider || '').toLowerCase();
-          const prim = entry.usage.primary;
-          const sec = entry.usage.secondary;
+          let prim = entry.usage.primary;
+          let sec = entry.usage.secondary;
           if (typeof prim.usedPercent !== 'number') continue;
+          // Some providers (Antigravity) report the weekly window as primary. The watch always
+          // shows the shorter window first, so swap them when primary is the longer one.
+          if (sec && typeof sec.usedPercent === 'number' && prim.windowMinutes && sec.windowMinutes &&
+              sec.windowMinutes < prim.windowMinutes) [prim, sec] = [sec, prim];
 
           const rem = Math.max(0, Math.min(100, Math.round(100 - prim.usedPercent)));
           const secRem = sec && typeof sec.usedPercent === 'number'
