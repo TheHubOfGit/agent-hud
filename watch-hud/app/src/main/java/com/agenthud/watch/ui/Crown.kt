@@ -22,6 +22,9 @@ class CrownRouter {
     /** Set while the main pager is on screen; called with +1 / -1 to move a page. */
     var pager: (suspend (Int) -> Unit)? = null
 
+    /** Set while Live Mode is active (and no modal scroll overlay is open); receives raw rotary delta. */
+    var rawListener: ((Float) -> Unit)? = null
+
     private var accumulated = 0f
     private var paging = false
 
@@ -35,6 +38,11 @@ class CrownRouter {
                 return { top.scroll.scrollBy(dy) }
             }
             if (top.modal) return null
+        }
+        val raw = rawListener
+        if (raw != null) {
+            accumulated = 0f
+            return { raw(dy) }
         }
         val pg = pager ?: return null
         if (paging) return null

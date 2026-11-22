@@ -43,6 +43,27 @@ class HapticsEngine(context: Context) {
     fun buzzSoftConfirm() = play(HapticEvent.TAPS, longArrayOf(0, 45), intArrayOf(0, 130))
     fun tapTick() = play(HapticEvent.TAPS, longArrayOf(0, 40), intArrayOf(0, 150))
 
+    /** Live Mode: immediate crisp detent tick per level crossed while turning the crown, scaled by level. */
+    fun buzzDialDetent(index: Int, total: Int) {
+        val frac = if (total > 1) index.coerceIn(0, total - 1).toFloat() / (total - 1) else 0.5f
+        val amp = (115 + (frac * 125).toInt()).coerceIn(100, 240)
+        val dur = (15L + (frac * 15).toLong())
+        play(HapticEvent.TAPS, longArrayOf(0, dur), intArrayOf(0, amp))
+    }
+
+    /** Live Mode: crisp lock-in confirmation pulse once the Mac commits the final thinking level. */
+    fun buzzLevelConfirmed(index: Int, total: Int) {
+        val frac = if (total > 1) index.coerceIn(0, total - 1).toFloat() / (total - 1) else 0.5f
+        val amp = (145 + (frac * 105).toInt()).coerceIn(130, 255)
+        play(HapticEvent.TAPS, longArrayOf(0, 34), intArrayOf(0, amp))
+    }
+
+    /** Live Mode: soft double micro-bump when already at lowest or highest thinking level. */
+    fun buzzBoundaryBump() = play(HapticEvent.TAPS, longArrayOf(0, 18, 38, 18), intArrayOf(0, 110, 0, 110))
+
+    /** Live Mode: crisp rising two-tick when single crown click starts watch-mic listening. */
+    fun buzzVoiceStart() = play(HapticEvent.TAPS, longArrayOf(0, 22, 34, 34), intArrayOf(0, 130, 0, 210))
+
     /** Plays the "needs you" pattern at [strength] regardless of switches, for settings previews. */
     fun preview(strength: Int) = vibrate(longArrayOf(0, 85, 65, 130), intArrayOf(0, 220, 0, 255), strength)
 

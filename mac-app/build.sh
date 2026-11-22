@@ -31,8 +31,12 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 # ad-hoc rebuild. The bundled copy reads nothing protected. Rebuild to pick up bridge changes.
 BRIDGE_SRC="$ROOT/../mac-agent-bridge"
 echo "==> Bundling bridge from $BRIDGE_SRC"
-mkdir -p "$APP/Contents/Resources/bridge"
+mkdir -p "$APP/Contents/Resources/bridge/bin"
 rsync -a --delete "$BRIDGE_SRC/src" "$BRIDGE_SRC/package.json" "$BRIDGE_SRC/node_modules" "$APP/Contents/Resources/bridge/"
+echo "==> Compiling live-ctrl Swift helper"
+swiftc -O "$BRIDGE_SRC/swift/live-ctrl.swift" \
+  -framework AppKit -framework ApplicationServices \
+  -o "$APP/Contents/Resources/bridge/bin/live-ctrl"
 # The 141 MB speech model goes to Application Support once (voice transcription looks there).
 MODEL_DIR="$HOME/Library/Application Support/AgentHUD/models"
 if [[ -f "$BRIDGE_SRC/models/ggml-base.en.bin" && ! -f "$MODEL_DIR/ggml-base.en.bin" ]]; then

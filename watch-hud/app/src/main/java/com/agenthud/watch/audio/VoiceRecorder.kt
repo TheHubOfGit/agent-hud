@@ -22,11 +22,12 @@ class VoiceRecorder {
 
     @Volatile
     private var recording = false
+    private val pcmLock = Any()
     private val pcmStream = ByteArrayOutputStream()
 
     @SuppressLint("MissingPermission")
     suspend fun recordUntilStopped(onAmplitude: (Float) -> Unit): ByteArray = withContext(Dispatchers.IO) {
-        pcmStream.reset()
+        synchronized(pcmLock) { pcmStream.reset() }
         val minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat).coerceAtLeast(3200)
         val recorder = AudioRecord(
             MediaRecorder.AudioSource.VOICE_RECOGNITION,
@@ -52,7 +53,7 @@ class VoiceRecorder {
                         bytes[i * 2] = (s and 0xFF).toByte()
                         bytes[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
                     }
-                    pcmStream.write(bytes)
+                    synchronized(pcmLock) { pcmStream.write(bytes) }
                     onAmplitude((peak / 32767f).coerceIn(0f, 1f))
                 }
             }
@@ -61,7 +62,19 @@ class VoiceRecorder {
             runCatching { recorder.stop() }
             runCatching { recorder.release() }
         }
-        wrapWav(pcmStream.toByteArray())
+        val allPcm = synchronized(pcmLock) { pcmStream.toByteArray() }
+        wrapWav(allPcm)
+    }
+
+    /** Current captured PCM byte count (for checking whether new audio arrived since last tail check). */
+    fun currentPcmBytes(): Int = synchronized(pcmLock) { pcmStream.size() }
+
+    /** Thread-safe WAV snapshot of the last [maxSeconds] of recording for fast trigger-word detection. */
+    fun snapshotTailWav(maxSeconds: Float = 2.2f): ByteArray {
+        val raw = synchronized(pcmLock) { pcmStream.toByteArray() }
+        val maxBytes = ((sampleRate * 2 * maxSeconds).toInt() and 0xFFFFFFFE.toInt()).coerceAtLeast(3200)
+        val tail = if (raw.size <= maxBytes) raw else raw.copyOfRange(raw.size - maxBytes, raw.size)
+        return wrapWav(tail)
     }
 
     fun stop() {

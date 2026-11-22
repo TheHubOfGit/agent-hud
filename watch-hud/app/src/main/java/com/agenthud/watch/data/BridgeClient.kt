@@ -53,6 +53,12 @@ class BridgeClient(
     private val _clockOffsetMs = MutableStateFlow(0L)
     val clockOffsetMs: StateFlow<Long> = _clockOffsetMs.asStateFlow()
 
+    private val _liveState = MutableStateFlow(LiveState())
+    val liveState: StateFlow<LiveState> = _liveState.asStateFlow()
+
+    @Volatile private var liveModeActive = false
+    @Volatile private var liveReqSeq = 0
+
     private var webSocket: WebSocket? = null
     private var reconnectJob: Job? = null
     private var nsdManager: NsdManager? = null
@@ -111,6 +117,85 @@ class BridgeClient(
     fun requestQuotaRefresh() {
         webSocket?.send("""{"type":"refresh_quotas"}""")
     }
+
+    fun setLiveMode(enabled: Boolean) {
+        liveModeActive = enabled
+        webSocket?.send("""{"type":"live_mode","enabled":$enabled}""")
+    }
+
+    fun stepLiveThinking(delta: Int, targetIndex: Int? = null, targetLevel: String? = null): Int {
+        val reqId = ++liveReqSeq
+        val dir = if (delta >= 0) 1 else -1
+        val payload = JSONObject().apply {
+            put("type", "live_thinking_step")
+            put("delta", dir)
+            put("reqId", reqId)
+            if (targetIndex != null && targetIndex >= 0) put("targetIndex", targetIndex)
+            if (!targetLevel.isNullOrBlank()) put("targetLevel", targetLevel)
+        }
+        webSocket?.send(payload.toString())
+        return reqId
+    }
+
+    suspend fun checkLiveVoiceTrigger(wavBytes: ByteArray, mode: String): Boolean =
+        withContext(Dispatchers.IO) {
+            if (activeHost.isBlank() || mode == "off") return@withContext false
+            try {
+                val req = Request.Builder()
+                    .url("http://$activeHost:$activePort/live-voice-check?mode=$mode")
+                    .header("X-HUD-Token", prefs.authToken)
+                    .post(wavBytes.toRequestBody("audio/wav".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@withContext false
+                    val body = resp.body?.string().orEmpty()
+                    runCatching { JSONObject(body).optBoolean("triggered", false) }.getOrDefault(false)
+                }
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+    /** [expectBundleId]: the app the watch is showing; the Mac refuses to paste into a different one. */
+    suspend fun sendLiveVoice(
+        wavBytes: ByteArray,
+        stripTrigger: String? = null,
+        expectBundleId: String? = null
+    ): Result<LiveSendResult> =
+        withContext(Dispatchers.IO) {
+            if (activeHost.isBlank()) return@withContext Result.failure(IllegalStateException("Mac not connected"))
+            try {
+                val params = buildList {
+                    if (!stripTrigger.isNullOrBlank() && stripTrigger != "off") add("stripTrigger=$stripTrigger")
+                    if (!expectBundleId.isNullOrBlank()) add("expect=" + java.net.URLEncoder.encode(expectBundleId, "UTF-8"))
+                }
+                val query = if (params.isEmpty()) "" else "?" + params.joinToString("&")
+                val req = Request.Builder()
+                    .url("http://$activeHost:$activePort/live-voice$query")
+                    .header("X-HUD-Token", prefs.authToken)
+                    .post(wavBytes.toRequestBody("audio/wav".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    val body = resp.body?.string().orEmpty()
+                    val json = runCatching { JSONObject(body) }.getOrNull()
+                    if (resp.isSuccessful && json != null && json.optBoolean("ok", true)) {
+                        Result.success(
+                            LiveSendResult(
+                                appName = json.optString("appName", "Mac"),
+                                text = json.optString("text", "").trim(),
+                                pastedOnly = json.optBoolean("pastedOnly", false)
+                            )
+                        )
+                    } else {
+                        val err = json?.let { it.optString("error").ifBlank { it.optString("message") } }
+                            .orEmpty().ifBlank { "Send failed (${resp.code})" }
+                        Result.failure(IllegalStateException(err))
+                    }
+                }
+            } catch (e: Throwable) {
+                Result.failure(e)
+            }
+        }
 
     suspend fun sendAction(threadId: String, action: String, text: String? = null): Result<String> =
         withContext(Dispatchers.IO) {
@@ -186,6 +271,9 @@ class BridgeClient(
                 _lastSeenMs.value = System.currentTimeMillis()
                 prefs.cachedHost = host
                 prefs.cachedPort = port
+                if (liveModeActive) {
+                    webSocket.send("""{"type":"live_mode","enabled":true}""")
+                }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -239,7 +327,33 @@ class BridgeClient(
             if (serverTime > 0L) {
                 _clockOffsetMs.value = serverTime - System.currentTimeMillis()
             }
-            if (json.optString("type") != "snapshot") return
+            val msgType = json.optString("type")
+            if (msgType == "live_state") {
+                val levelsArr = json.optJSONArray("levels") ?: JSONArray()
+                val levels = buildList {
+                    for (i in 0 until levelsArr.length()) {
+                        val s = levelsArr.optString(i)
+                        if (s.isNotBlank()) add(s)
+                    }
+                }
+                _liveState.value = LiveState(
+                    appName = json.optString("appName", "Mac"),
+                    bundleId = json.optString("bundleId", ""),
+                    provider = json.optString("provider", ""),
+                    dialSupported = json.optBoolean("dialSupported", false),
+                    level = json.optString("level", ""),
+                    levels = levels,
+                    index = json.optInt("index", -1),
+                    reqId = json.optInt("reqId", 0),
+                    confirmed = json.optBoolean("confirmed", false),
+                    changed = json.optBoolean("changed", false),
+                    boundary = json.optBoolean("boundary", false),
+                    error = if (json.isNull("error")) null else json.optString("error", "").ifBlank { null },
+                    updatedAtMs = System.currentTimeMillis()
+                )
+                return
+            }
+            if (msgType != "snapshot") return
             // Arrival log for latency checks: compare with the bridge's send time (serverTimeMs).
             android.util.Log.d("AgentHUD", "snapshot seq=${json.optLong("seq")} threads=${json.optJSONArray("threads")?.let { a -> (0 until a.length()).joinToString(",") { i -> a.optJSONObject(i)?.let { o -> o.optString("provider").take(6) + ":" + o.optString("status") } ?: "?" } } ?: ""} sentAt=$serverTime recvAt=${System.currentTimeMillis()}")
 

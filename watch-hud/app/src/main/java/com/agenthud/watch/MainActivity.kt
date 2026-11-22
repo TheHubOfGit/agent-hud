@@ -40,6 +40,7 @@ class MainActivity : ComponentActivity() {
     private var batteryPct by mutableIntStateOf(65)
     private var batteryTempC by mutableFloatStateOf(32.0f)
     private var isDocked by mutableStateOf(true)
+    private var liveRecording by mutableStateOf(false)
     /** Bumped on every crown press (Home) while the HUD is the home app; HudRoot goes home. */
     private var homePresses by mutableIntStateOf(0)
     private var screenMode by mutableIntStateOf(0)
@@ -128,6 +129,12 @@ class MainActivity : ComponentActivity() {
                 },
                 onApplyBrightness = { applyBrightness(it) },
                 onWakeScreen = { wakeDisplayForAlert() },
+                onLiveRecordingChanged = { active ->
+                    if (liveRecording != active) {
+                        liveRecording = active
+                        updateScreenKeepOn()
+                    }
+                },
                 homePresses = homePresses,
                 onOpenWatchFace = { openStockLauncher() },
                 onOpenWatchApps = {
@@ -247,7 +254,7 @@ class MainActivity : ComponentActivity() {
         screenHandler.removeCallbacks(screenTimeoutCheck)
         val mins = PrefsStore.SCREEN_MODES[screenMode].second
         val holdOn = when {
-            isDocked || mins < 0 -> true
+            isDocked || liveRecording || mins < 0 -> true
             mins == 0 -> false
             else -> {
                 val remaining = mins * 60_000L - (System.currentTimeMillis() - lastInteractionMs)

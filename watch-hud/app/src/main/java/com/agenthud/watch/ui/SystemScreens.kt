@@ -65,6 +65,10 @@ fun QuickControlsOverlay(
     onCycleBrightness: () -> Unit,
     onReconnect: () -> Unit,
     onDismiss: () -> Unit,
+    liveMode: Boolean = false,
+    onToggleLiveMode: () -> Unit = {},
+    voiceTriggerLabel: String = "Off",
+    onCycleVoiceTrigger: () -> Unit = {},
     verticalPages: Boolean = false,
     onTogglePages: () -> Unit = {},
     /** Shown as a page of the vertical pager rather than as a pop-up over the HUD. */
@@ -123,6 +127,57 @@ fun QuickControlsOverlay(
                         )
                     }
                 }
+            }
+
+            // Live Mode: turns the watch into a live Mac macro dial + voice auto-send puck
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(if (liveMode) Color(0xFF162C46) else Color(0xFF16181C))
+                    .clickable { onToggleLiveMode() }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp)
+                ) {
+                    DialIcon(color = if (liveMode) ColorBlue else Color(0xFFDADCE0), size = 14.dp)
+                    Text(
+                        text = "Live Mode",
+                        fontSize = 12.sp,
+                        color = if (liveMode) ColorBlue else Color(0xFFDADCE0),
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Text(
+                    text = if (liveMode) "On" else "Off",
+                    fontSize = 11.sp,
+                    color = if (liveMode) ColorBlue else ColorMuted,
+                    fontWeight = if (liveMode) FontWeight.SemiBold else FontWeight.Normal
+                )
+            }
+
+            // Optional end-of-dictation trigger word for Live Mode (default Off: click to start & click to send)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF16181C))
+                    .clickable { onCycleVoiceTrigger() }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Voice send", fontSize = 12.sp, color = Color(0xFFDADCE0), fontWeight = FontWeight.Medium)
+                Text(
+                    text = voiceTriggerLabel,
+                    fontSize = 11.sp,
+                    color = if (voiceTriggerLabel == "Off") ColorMuted else ColorBlue,
+                    maxLines = 1
+                )
             }
 
             // 2x2 Vector Icon Action Tiles (zero emojis)

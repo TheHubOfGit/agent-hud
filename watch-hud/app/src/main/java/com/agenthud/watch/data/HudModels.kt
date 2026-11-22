@@ -100,6 +100,26 @@ data class HudSnapshot(
     val quotas: List<QuotaItem> = emptyList()
 )
 
+data class LiveState(
+    val appName: String = "Mac",
+    val bundleId: String = "",
+    val provider: String = "",
+    val dialSupported: Boolean = false,
+    val level: String = "",
+    val levels: List<String> = emptyList(),
+    val index: Int = -1,
+    val reqId: Int = 0,
+    val confirmed: Boolean = false,
+    val changed: Boolean = false,
+    val boundary: Boolean = false,
+    val error: String? = null,
+    val updatedAtMs: Long = 0L
+)
+
+/** Result of a Live Mode voice send. [pastedOnly]: the front app is not an agent chat, so the text was
+ *  pasted but Return was left for the person to press. */
+data class LiveSendResult(val appName: String, val text: String, val pastedOnly: Boolean)
+
 fun parseHexColor(hex: String?, fallback: Color): Color {
     if (hex.isNullOrBlank()) return fallback
     return try {

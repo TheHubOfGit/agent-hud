@@ -12,6 +12,7 @@ import { CodexCollector } from './collectors/codex.mjs';
 import { CodexBarCollector } from './collectors/codexbar.mjs';
 import { T3CodeCollector } from './collectors/t3code.mjs';
 import { dispatchWatchAction } from './dispatch.mjs';
+import { LiveController } from './live.mjs';
 import { transcribeWavBuffer } from './stt.mjs';
 
 const PORT = Number(process.env.AGENT_HUD_PORT || 8765);
@@ -44,6 +45,42 @@ const antigravity = new AntigravityCollector(() => scheduleBroadcast());
 const codex = new CodexCollector(() => scheduleBroadcast());
 const claude = new ClaudeCollector(() => scheduleBroadcast());
 const t3code = new T3CodeCollector(() => scheduleBroadcast());
+const live = new LiveController((state) => broadcastLiveState(state));
+
+function broadcastLiveState(state) {
+  if (!wss || wss.clients.size === 0) return;
+  const payload = JSON.stringify({
+    type: 'live_state',
+    serverTimeMs: Date.now(),
+    ...state,
+    confirmed: false,
+    changed: false,
+    boundary: false,
+  });
+  for (const client of wss.clients) {
+    if (client.readyState === 1 && client.liveMode) {
+      client.send(payload);
+    }
+  }
+}
+
+const TRIGGER_PATTERNS = {
+  send: /(?:[\s,;:\-—]+|^)(send\s+it|send)[\s.!?,]*$/i,
+  go: /(?:[\s,;:\-—]+|^)(go)[\s.!?,]*$/i,
+  okay: /(?:[\s,;:\-—]+|^)(okay|ok)[\s.!?,]*$/i,
+  all: /(?:[\s,;:\-—]+|^)(send\s+it|send|go|okay|ok)[\s.!?,]*$/i,
+};
+
+function matchTriggerWord(text, mode) {
+  const clean = String(text || '').trim();
+  const re = TRIGGER_PATTERNS[String(mode || '').toLowerCase()];
+  if (!clean || !re) return { matched: false, word: '', stripped: clean };
+  const m = clean.match(re);
+  if (!m) return { matched: false, word: '', stripped: clean };
+  const word = m[1].toLowerCase();
+  const stripped = clean.slice(0, m.index).replace(/[\s,;:\-—]+$/, '').trim();
+  return { matched: true, word, stripped };
+}
 
 function getLocalLanIp() {
   const ifaces = os.networkInterfaces();
@@ -219,6 +256,13 @@ function isAuthorized(req, urlObj) {
   return tokenMatches(headerToken) || tokenMatches(queryToken);
 }
 
+// The Live debug endpoints click and read UI in the front Mac app, so they are for local use only:
+// a watch (or anything else on the LAN) holding the token cannot call them.
+function isLoopbackReq(req) {
+  const ip = req.socket.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
 const server = http.createServer(async (req, res) => {
   const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   res.setHeader('Content-Type', 'application/json');
@@ -353,6 +397,111 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Fast tail check for optional Live Mode end-of-dictation trigger word ("send", "go", "okay")
+    if (req.method === 'POST' && urlObj.pathname === '/live-voice-check') {
+      const mode = (urlObj.searchParams.get('mode') || 'off').toLowerCase();
+      if (mode === 'off') {
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, triggered: false, word: '' }));
+        return;
+      }
+      const wavBuf = await readRawBody(req);
+      let tailText = '';
+      try {
+        tailText = (await transcribeWavBuffer(wavBuf)).trim();
+      } catch {
+        // Nothing audible in the tail (the usual case between phrases): not an error, just no trigger.
+      }
+      const match = matchTriggerWord(tailText, mode);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, triggered: match.matched, word: match.word }));
+      return;
+    }
+
+    // Live Mode: transcribe watch mic audio & immediately paste+send to the focused Mac app
+    if (req.method === 'POST' && urlObj.pathname === '/live-voice') {
+      const wavBuf = await readRawBody(req);
+      let transcript = (await transcribeWavBuffer(wavBuf)).trim();
+      const stripMode = (urlObj.searchParams.get('stripTrigger') || '').toLowerCase();
+      if (stripMode && stripMode !== 'off') {
+        const m = matchTriggerWord(transcript, stripMode);
+        if (m.matched) {
+          if (m.stripped) {
+            transcript = m.stripped;
+          } else if (m.word === 'send' || m.word === 'send it') {
+            transcript = '';
+          }
+          // Standalone "go" or "okay" is kept as-is when nothing preceded it.
+        }
+      }
+      if (!transcript) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: 'No speech detected' }));
+        return;
+      }
+      const pressReturn = urlObj.searchParams.get('send') !== '0';
+      // The app the watch was showing: the Mac refuses to paste if a different one is in front.
+      const expectBundleId = urlObj.searchParams.get('expect') || '';
+      const sent = await live.pasteSend(transcript, pressReturn, expectBundleId);
+      console.log(`[live-voice] -> ${sent.appName || '?'}: ${sent.ok ? (sent.pastedOnly ? 'pasted, Return left to you' : 'ok') : 'FAILED'} [${transcript.length} chars]${stripMode ? ` (trigger:${stripMode})` : ''}${sent.error ? ` (${sent.error})` : ''}`);
+      res.writeHead(sent.ok ? 200 : 400);
+      res.end(JSON.stringify({ ...sent, text: transcript }));
+      return;
+    }
+
+    if (req.method === 'GET' && urlObj.pathname === '/live/status') {
+      const state = await live.inspect();
+      res.writeHead(200);
+      res.end(JSON.stringify(state));
+      return;
+    }
+
+    if (req.method === 'POST' && urlObj.pathname === '/live/step') {
+      const body = await readJsonBody(req);
+      const delta = Number(body.delta) >= 0 ? 1 : -1;
+      const targetLevel = typeof body.targetLevel === 'string' ? body.targetLevel : null;
+      const targetIndex = typeof body.targetIndex === 'number' ? body.targetIndex : null;
+      const result = await live.step(delta, targetLevel, targetIndex);
+      console.log(`[live-step] ${targetLevel || (delta > 0 ? '+1' : '-1')} -> ${result.appName || '?'}: level=${result.level || '?'} confirmed=${result.confirmed} changed=${result.changed}${result.error ? ` (${result.error})` : ''}`);
+      res.writeHead(result.ok ? 200 : 400);
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    if (req.method === 'GET' && urlObj.pathname === '/live/debug-ax' && isLoopbackReq(req)) {
+      const targetApp = urlObj.searchParams.get('app') || '';
+      const info = await live.debugAx(targetApp);
+      res.writeHead(200);
+      res.end(JSON.stringify(info, null, 2));
+      return;
+    }
+
+    if (req.method === 'GET' && urlObj.pathname === '/live/debug-menu' && isLoopbackReq(req)) {
+      const targetApp = urlObj.searchParams.get('app') || '';
+      const info = await live.debugMenu(targetApp);
+      res.writeHead(200);
+      res.end(JSON.stringify(info, null, 2));
+      return;
+    }
+
+    // Loopback-only preview helper (like POST /event) to test Live Mode dial visuals on the watch
+    if (req.method === 'POST' && urlObj.pathname === '/live/preview' && isLoopbackReq(req)) {
+      const body = await readJsonBody(req);
+      broadcastLiveState({
+        ok: true,
+        appName: body.appName || 'Antigravity',
+        bundleId: body.bundleId || '',
+        provider: body.provider || 'antigravity',
+        dialSupported: body.dialSupported !== false,
+        level: body.level || 'Medium',
+        levels: Array.isArray(body.levels) ? body.levels : ['Low', 'Medium', 'High'],
+        index: typeof body.index === 'number' ? body.index : 1,
+      });
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'Not found' }));
   } catch (err) {
@@ -391,6 +540,34 @@ wss.on('connection', (ws, req) => {
         ws.send(JSON.stringify({ type: 'pong', serverTimeMs: Date.now() }));
       } else if (msg.type === 'refresh_quotas') {
         codexBar.refreshViaCli();
+      } else if (msg.type === 'live_mode') {
+        ws.liveMode = Boolean(msg.enabled);
+        if (ws.liveMode) {
+          try {
+            const state = await live.inspect();
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'live_state', serverTimeMs: Date.now(), ...state, confirmed: false, changed: false, boundary: false }));
+            }
+          } catch (err) {
+            if (ws.readyState === 1) {
+              ws.send(JSON.stringify({ type: 'live_state', serverTimeMs: Date.now(), ...live.getLastState(), confirmed: false, changed: false, boundary: false, error: err.message }));
+            }
+          }
+        }
+      } else if (msg.type === 'live_thinking_step') {
+        const delta = Number(msg.delta) >= 0 ? 1 : -1;
+        const targetLevel = typeof msg.targetLevel === 'string' ? msg.targetLevel : null;
+        const targetIndex = typeof msg.targetIndex === 'number' ? msg.targetIndex : null;
+        let result;
+        try {
+          result = await live.step(delta, targetLevel, targetIndex);
+        } catch (err) {
+          result = { ok: false, ...live.getLastState(), confirmed: false, changed: false, boundary: false, error: err.message };
+        }
+        console.log(`[live-step] ${targetLevel || (delta > 0 ? '+1' : '-1')} -> ${result.appName || '?'}: level=${result.level || '?'} confirmed=${result.confirmed} changed=${result.changed}${result.error ? ` (${result.error})` : ''}`);
+        if (ws.readyState === 1) {
+          ws.send(JSON.stringify({ type: 'live_state', serverTimeMs: Date.now(), ...result, reqId: msg.reqId || 0 }));
+        }
       } else if (msg.type === 'action') {
         const snapshot = buildUnifiedSnapshot();
         const thread = snapshot.threads.find(t => t.id === msg.threadId);  // never guess: a stale id must not reach another session
@@ -512,6 +689,7 @@ server.listen(PORT, '0.0.0.0', () => {
   codex.start();
   claude.start();
   t3code.start();
+  live.start();
   startMdns();
   const lanIp = getLocalLanIp();
   console.log(`[mac-agent-bridge] v${BRIDGE_VERSION} pid ${process.pid} listening on http://${lanIp}:${PORT} (ws://${lanIp}:${PORT}/ws)`);
@@ -536,6 +714,7 @@ function shutdown() {
   codex.stop();
   claude.stop();
   t3code.stop();
+  live.stop();
   mdnsStopped = true;
   if (dnsSdProc) try { dnsSdProc.kill(); } catch {}
   // server.close() waits for open sockets, so a connected watch would keep this stale process

@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import androidx.compose.ui.unit.dp
@@ -51,6 +52,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Longest Live Mode dictation. Past this the recording stops and is sent. It bounds mic-on time,
+ * the audio buffer, and how long the Mac takes to transcribe (the watch gives that call 20 s).
+ */
+private const val LIVE_MAX_RECORD_SECONDS = 90
+
 @Composable
 fun HudRoot(
     bridge: BridgeClient,
@@ -67,6 +74,7 @@ fun HudRoot(
     requestMicPermission: () -> Unit,
     onApplyBrightness: (Float) -> Unit,
     onWakeScreen: () -> Unit,
+    onLiveRecordingChanged: (Boolean) -> Unit = {},
     homePresses: Int = 0,
     onOpenWatchFace: () -> Unit = {},
     onOpenWatchApps: () -> Unit = {},
@@ -75,6 +83,7 @@ fun HudRoot(
     val scope = rememberCoroutineScope()
     val connState by bridge.connectionState.collectAsState()
     val snapshot by bridge.snapshot.collectAsState()
+    val liveState by bridge.liveState.collectAsState()
     val lastSeenMs by bridge.lastSeenMs.collectAsState()
     val clockOffsetMs by bridge.clockOffsetMs.collectAsState()
 
@@ -86,6 +95,86 @@ fun HudRoot(
     var showVibration by remember { mutableStateOf(false) }
     var quotaRings by remember { mutableStateOf(prefs.quotaRings) }
     var verticalPages by remember { mutableStateOf(prefs.verticalPages) }
+    var liveMode by remember { mutableStateOf(prefs.liveMode) }
+    var voiceTriggerMode by remember { mutableIntStateOf(prefs.voiceTriggerMode) }
+    var liveVoiceState by remember { mutableStateOf<LiveVoiceState>(LiveVoiceState.Idle) }
+    var liveRecordJob by remember { mutableStateOf<Job?>(null) }
+    var liveStepReqId by remember { mutableIntStateOf(0) }
+    var liveStepInFlight by remember { mutableStateOf(false) }
+    var livePreviewIndex by remember { mutableStateOf<Int?>(null) }
+    var liveCommitJob by remember { mutableStateOf<Job?>(null) }
+    var lastCrownClickMs by remember { mutableLongStateOf(0L) }
+
+    fun commitLiveTargetIfNeeded(targetIdx: Int?) {
+        val target = targetIdx ?: return
+        if (liveStepInFlight) return
+        if (!liveState.dialSupported || liveState.levels.isEmpty()) {
+            livePreviewIndex = null
+            return
+        }
+        val clamped = target.coerceIn(0, liveState.levels.lastIndex)
+        if (clamped == liveState.index) {
+            livePreviewIndex = null
+            return
+        }
+        val delta = if (clamped > liveState.index) 1 else -1
+        val targetLevel = liveState.levels.getOrNull(clamped)
+        liveStepInFlight = true
+        liveStepReqId = bridge.stepLiveThinking(delta, targetIndex = clamped, targetLevel = targetLevel)
+    }
+
+    LaunchedEffect(liveMode) {
+        bridge.setLiveMode(liveMode)
+        if (!liveMode) {
+            voiceRecorder.stop()
+            liveRecordJob?.cancel()
+            liveCommitJob?.cancel()
+            liveVoiceState = LiveVoiceState.Idle
+            liveStepInFlight = false
+            livePreviewIndex = null
+        }
+    }
+
+    // Clear any local dial preview when switching to a different Mac app.
+    LaunchedEffect(liveState.bundleId, liveState.appName) {
+        liveCommitJob?.cancel()
+        livePreviewIndex = null
+        liveStepInFlight = false
+    }
+
+    LaunchedEffect(liveVoiceState is LiveVoiceState.Listening) {
+        onLiveRecordingChanged(liveVoiceState is LiveVoiceState.Listening)
+    }
+
+    // Lock-in confirmation once the Mac commits the final target level (or chain if user turned again).
+    LaunchedEffect(liveState.reqId, liveState.updatedAtMs) {
+        val reqId = liveState.reqId
+        if (reqId != 0 && reqId == liveStepReqId) {
+            liveStepInFlight = false
+            val wanted = livePreviewIndex
+            if (liveState.confirmed && wanted != null && wanted != liveState.index && liveState.levels.isNotEmpty()) {
+                // User kept turning while the previous step was in flight — jump straight to final target!
+                commitLiveTargetIfNeeded(wanted)
+                return@LaunchedEffect
+            }
+            livePreviewIndex = null
+            when {
+                liveState.confirmed && liveState.changed -> haptics.buzzLevelConfirmed(liveState.index, liveState.levels.size)
+                liveState.boundary -> haptics.buzzBoundaryBump()
+                !liveState.confirmed || liveState.error != null -> haptics.buzzError()
+            }
+        }
+    }
+
+    // Safety timeout if a thinking-level step never gets a response (e.g. brief Wi-Fi blip). Longer
+    // than the bridge's own 5 s limit, so a slow step is not shown as failed and then land anyway.
+    LaunchedEffect(liveStepInFlight, liveStepReqId) {
+        if (liveStepInFlight) {
+            delay(6000L)
+            liveStepInFlight = false
+            livePreviewIndex = null
+        }
+    }
 
     var voiceState by remember { mutableStateOf<VoiceUiState>(VoiceUiState.Hidden) }
     var voiceTargetThread by remember { mutableStateOf<AgentThread?>(null) }
@@ -155,7 +244,13 @@ fun HudRoot(
         val firstId = queue.firstOrNull()
         val isMuted = System.currentTimeMillis() < mutedUntilMs
 
-        if (firstId != null) {
+        if (liveMode) {
+            // Stay pinned in Live Mode so background agent alerts never hijack the crown mid-dictation.
+            // A subtle tappable waiting pill is shown at the bottom of LiveModeScreen instead.
+            if (firstId != null && firstId != lastFirstApprovalId && !isMuted) {
+                haptics.buzzQueuedTick()
+            }
+        } else if (firstId != null) {
             val targetIdx = snapshot.threads.indexOfFirst { it.id == firstId }
             if (firstId != lastFirstApprovalId) {
                 // Brand new oldest approval (either first arrival or advanced after resolving previous)
@@ -216,11 +311,121 @@ fun HudRoot(
         }
     }
 
-    // Crown press (Home): close any popup and return to the HUD's main page.
+    fun startLiveVoice() {
+        if (!hasMicPermission()) {
+            requestMicPermission()
+            liveVoiceState = LiveVoiceState.Error("Grant Mic permission and click again")
+            return
+        }
+        val targetApp = liveState.appName.ifBlank { "Mac" }
+        val triggerKey = PrefsStore.VOICE_TRIGGER_MODES[voiceTriggerMode].second
+        liveVoiceState = LiveVoiceState.Listening(0.1f, 0)
+        haptics.buzzVoiceStart()
+
+        liveRecordJob?.cancel()
+        liveRecordJob = scope.launch {
+            val start = System.currentTimeMillis()
+            var heardSpeech = false
+            var lastSpeechMs = start
+            var autoTriggered = false
+
+            val triggerWatcher = if (triggerKey != "off") {
+                launch {
+                    var lastCheckedBytes = 0
+                    while (liveVoiceState is LiveVoiceState.Listening) {
+                        delay(160L)
+                        val now = System.currentTimeMillis()
+                        if (heardSpeech && now - lastSpeechMs >= 520L) {
+                            val curBytes = voiceRecorder.currentPcmBytes()
+                            if (curBytes > lastCheckedBytes + 6400) {
+                                lastCheckedBytes = curBytes
+                                val tailWav = voiceRecorder.snapshotTailWav(2.2f)
+                                if (bridge.checkLiveVoiceTrigger(tailWav, triggerKey) &&
+                                    liveVoiceState is LiveVoiceState.Listening
+                                ) {
+                                    autoTriggered = true
+                                    haptics.buzzSoftConfirm()
+                                    voiceRecorder.stop()
+                                    break
+                                }
+                            }
+                        }
+                    }
+                }
+            } else null
+
+            val wav = voiceRecorder.recordUntilStopped { amp ->
+                val now = System.currentTimeMillis()
+                val sec = ((now - start) / 1000L).toInt()
+                // Hard stop (the clip is sent as normal): see LIVE_MAX_RECORD_SECONDS.
+                if (sec >= LIVE_MAX_RECORD_SECONDS) voiceRecorder.stop()
+                if (now - start > 220L && amp >= 0.055f) {
+                    heardSpeech = true
+                    lastSpeechMs = now
+                }
+                if (liveVoiceState is LiveVoiceState.Listening) {
+                    liveVoiceState = LiveVoiceState.Listening(amp, sec)
+                }
+            }
+            triggerWatcher?.cancel()
+
+            if (liveVoiceState !is LiveVoiceState.Idle) {
+                val appNow = liveState.appName.ifBlank { targetApp }
+                liveVoiceState = LiveVoiceState.Sending(appNow)
+                val strip = if (autoTriggered) triggerKey else null
+                bridge.sendLiveVoice(wav, stripTrigger = strip, expectBundleId = liveState.bundleId)
+                    .onSuccess { sent ->
+                        haptics.buzzCleared()
+                        liveVoiceState = LiveVoiceState.Sent(sent.appName.ifBlank { appNow }, sent.text, sent.pastedOnly)
+                        // Pasted-only needs the person to act, so stay up long enough to read it.
+                        delay(if (sent.pastedOnly) 2600L else 1100L)
+                        if (liveVoiceState is LiveVoiceState.Sent) liveVoiceState = LiveVoiceState.Idle
+                    }
+                    .onFailure { err ->
+                        haptics.buzzError()
+                        liveVoiceState = LiveVoiceState.Error(err.message ?: "Send failed")
+                        delay(2200L)
+                        if (liveVoiceState is LiveVoiceState.Error) liveVoiceState = LiveVoiceState.Idle
+                    }
+            }
+        }
+    }
+
+    fun toggleLiveVoice() {
+        when (liveVoiceState) {
+            is LiveVoiceState.Listening -> {
+                haptics.buzzSoftConfirm()
+                voiceRecorder.stop()
+            }
+            is LiveVoiceState.Sending -> Unit
+            else -> startLiveVoice()
+        }
+    }
+
+    fun cancelLiveVoice() {
+        voiceRecorder.stop()
+        liveRecordJob?.cancel()
+        liveVoiceState = LiveVoiceState.Idle
+    }
+
+    // Crown press (Home):
+    // - If an overlay (Controls/Vibration) is open, close it.
+    // - In Live Mode: 1st click starts watch-mic listening; 2nd click stops & auto-sends to focused Mac app.
+    // - In normal HUD mode: close popups and return to Home.
     LaunchedEffect(homePresses) {
         if (homePresses == 0) return@LaunchedEffect
-        showControls = false
-        showVibration = false
+        if (showControls || showVibration) {
+            showControls = false
+            showVibration = false
+            return@LaunchedEffect
+        }
+        if (liveMode) {
+            val now = System.currentTimeMillis()
+            if (now - lastCrownClickMs < 350L) return@LaunchedEffect
+            lastCrownClickMs = now
+            toggleLiveVoice()
+            return@LaunchedEffect
+        }
         doneAlertThread = null
         if (pagerState.currentPage != homePage) pagerState.animateScrollToPage(homePage)
     }
@@ -302,7 +507,7 @@ fun HudRoot(
     val crownFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { crownFocus.requestFocus() } }
     // Overlays come and go; make sure the root keeps focus so the crown keeps working.
-    LaunchedEffect(showControls, showVibration, voiceState is VoiceUiState.Hidden, doneAlertThread) {
+    LaunchedEffect(showControls, showVibration, voiceState is VoiceUiState.Hidden, doneAlertThread, liveMode, liveVoiceState) {
         runCatching { crownFocus.requestFocus() }
     }
 
@@ -364,6 +569,20 @@ fun HudRoot(
             },
             onReconnect = { bridge.forceReconnect() },
             onDismiss = { if (asPage) scope.launch { pagerState.animateScrollToPage(homePage) } else showControls = false },
+            liveMode = liveMode,
+            onToggleLiveMode = {
+                liveMode = !liveMode
+                prefs.liveMode = liveMode
+                showControls = false
+                nightMode = false
+                haptics.tapTick()
+            },
+            voiceTriggerLabel = PrefsStore.VOICE_TRIGGER_MODES[voiceTriggerMode].first,
+            onCycleVoiceTrigger = {
+                voiceTriggerMode = (voiceTriggerMode + 1) % PrefsStore.VOICE_TRIGGER_MODES.size
+                prefs.voiceTriggerMode = voiceTriggerMode
+                haptics.tapTick()
+            },
             verticalPages = verticalPages,
             onTogglePages = {
                 verticalPages = !verticalPages
@@ -383,6 +602,8 @@ fun HudRoot(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            // Rotate 90° clockwise in Live Mode only so the physical crown sits at the top (12 o'clock).
+            .graphicsLayer { rotationZ = if (liveMode) 90f else 0f }
             // Crown: the root holds focus (rotary events only reach a focused node) and hands
             // each turn to the CrownRouter, which scrolls the active screen or pages.
             .onRotaryScrollEvent { ev ->
@@ -391,15 +612,15 @@ fun HudRoot(
             }
             .focusRequester(crownFocus)
             .focusable()
-            .pointerInput(verticalPages) {
-                // Swipe down opens Controls in the side layout; in the vertical layout it pages.
-                if (verticalPages) return@pointerInput
+            .pointerInput(verticalPages, liveMode) {
+                // Swipe down opens Controls in the side layout — and always in Live Mode so you can exit/toggle.
+                if (verticalPages && !liveMode) return@pointerInput
                 var totalDragY = 0f
                 detectVerticalDragGestures(
                     onDragStart = { totalDragY = 0f },
                     onVerticalDrag = { _, dragAmount ->
                         totalDragY += dragAmount
-                        if (totalDragY > 56f && !showControls && voiceState is VoiceUiState.Hidden) {
+                        if (totalDragY > 56f && !showControls && voiceState is VoiceUiState.Hidden && liveVoiceState is LiveVoiceState.Idle) {
                             showControls = true
                         }
                     }
@@ -450,8 +671,80 @@ fun HudRoot(
                     )
                 }
 
-                showControls && !verticalPages -> {
+                showControls && (!verticalPages || liveMode) -> {
                     controlsContent(false, true)
+                }
+
+                liveMode && connState != ConnectionState.DISCOVERING && connState != ConnectionState.OFFLINE -> {
+                    val latestLiveVoice by rememberUpdatedState(liveVoiceState)
+                    val latestLiveState by rememberUpdatedState(liveState)
+                    val latestPreview by rememberUpdatedState(livePreviewIndex)
+                    DisposableEffect(Unit) {
+                        var accum = 0f
+                        crownRouter.rawListener = { dy ->
+                            if (latestLiveVoice is LiveVoiceState.Idle) {
+                                if (accum != 0f && (accum > 0f) != (dy > 0f)) accum = 0f
+                                accum += dy
+                                val stepPx = 124f
+                                var target = latestPreview ?: latestLiveState.index
+                                var stepped = false
+                                while (kotlin.math.abs(accum) >= stepPx) {
+                                    val dir = if (accum > 0f) 1 else -1
+                                    accum -= dir * stepPx
+                                    val count = latestLiveState.levels.size
+                                    if (!latestLiveState.dialSupported || count == 0) {
+                                        haptics.buzzBoundaryBump()
+                                        accum = 0f
+                                        break
+                                    }
+                                    val cur = target.coerceIn(0, count - 1)
+                                    val next = (cur + dir).coerceIn(0, count - 1)
+                                    if (next != cur) {
+                                        target = next
+                                        livePreviewIndex = next
+                                        haptics.buzzDialDetent(next, count)
+                                        stepped = true
+                                    } else {
+                                        haptics.buzzBoundaryBump()
+                                        accum = 0f
+                                        break
+                                    }
+                                }
+                                if (stepped) {
+                                    val finalTarget = target
+                                    liveCommitJob?.cancel()
+                                    liveCommitJob = scope.launch {
+                                        delay(320L)
+                                        commitLiveTargetIfNeeded(finalTarget)
+                                    }
+                                }
+                            }
+                        }
+                        onDispose { crownRouter.rawListener = null }
+                    }
+                    LiveModeScreen(
+                        liveState = liveState,
+                        voiceState = liveVoiceState,
+                        previewIndex = livePreviewIndex,
+                        stepInFlight = liveStepInFlight,
+                        waitingCount = snapshot.approvalQueue.size,
+                        voiceTriggerKey = PrefsStore.VOICE_TRIGGER_MODES[voiceTriggerMode].second,
+                        onToggleVoice = { toggleLiveVoice() },
+                        onCancelVoice = { cancelLiveVoice() },
+                        onDismissError = { liveVoiceState = LiveVoiceState.Idle },
+                        onOpenWaiting = {
+                            liveMode = false
+                            prefs.liveMode = false
+                            val firstId = snapshot.approvalQueue.firstOrNull()
+                            val idx = snapshot.threads.indexOfFirst { it.id == firstId }
+                            if (idx >= 0) scope.launch { pagerState.scrollToPage(agentBase + idx) }
+                        },
+                        onExitLive = {
+                            liveMode = false
+                            prefs.liveMode = false
+                            haptics.tapTick()
+                        }
+                    )
                 }
 
                 doneAlertThread != null && !hasPendingApproval -> {
@@ -587,7 +880,7 @@ fun HudRoot(
         // Not on the Orbit/Pulse home page: there the waiting agent's own aurora is the signal.
         val homeHasOwnSignal = pagerState.currentPage == homePage && currentLayout != HomeLayout.ZEN &&
             !showControls && !showVibration && doneAlertThread == null
-        if ((hasPendingApproval || hasError) && voiceState is VoiceUiState.Hidden && !homeHasOwnSignal) {
+        if ((hasPendingApproval || hasError) && voiceState is VoiceUiState.Hidden && !homeHasOwnSignal && !liveMode) {
             PerimeterEdgeFlash(color = if (hasPendingApproval) ColorAmber else ColorRed)
         }
     }

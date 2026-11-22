@@ -51,6 +51,13 @@ export async function transcribeWavBuffer(wavBuffer) {
     const cleaned = raw
       .replace(/\[BLANK_AUDIO\]/gi, '')
       .replace(/\(blank audio\)/gi, '')
+      // Whisper labels non-speech (typing, music, a sigh) as [typing], (keyboard clicking), *sigh*
+      // or a note glyph. Live Mode presses Return after pasting, so those must never reach an agent
+      // chat as if they were words. Spoken words never come out in brackets, so dropping is safe.
+      .replace(/\[[^\]]*\]/g, '')
+      .replace(/(^|\s)\([^()]*\)(?=\s|$|[.,!?])/g, '$1')
+      .replace(/(^|\s)\*[^*\n]+\*(?=\s|$|[.,!?])/g, '$1')
+      .replace(/[\u266A\u266B]+/g, '')
       .replace(/\s+/g, ' ')
       .trim();
 

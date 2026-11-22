@@ -156,3 +156,29 @@ fun RefreshIcon(color: Color, size: Dp = 15.dp) {
         drawLine(color, Offset(w * 0.80f, h * 0.32f), Offset(w * 0.62f, h * 0.34f), strokeWidth = stroke.width, cap = StrokeCap.Round)
     }
 }
+
+@Composable
+fun DialIcon(color: Color, size: Dp = 15.dp) {
+    Canvas(modifier = Modifier.size(size)) {
+        val w = this.size.width
+        val h = this.size.height
+        val stroke = Stroke(width = w * 0.11f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        drawArc(
+            color = color,
+            startAngle = 135f,
+            sweepAngle = 270f,
+            useCenter = false,
+            topLeft = Offset(w * 0.16f, h * 0.16f),
+            size = Size(w * 0.68f, h * 0.68f),
+            style = stroke
+        )
+        drawCircle(color, radius = w * 0.08f, center = Offset(w * 0.50f, h * 0.54f))
+        drawLine(
+            color = color,
+            start = Offset(w * 0.50f, h * 0.54f),
+            end = Offset(w * 0.70f, h * 0.32f),
+            strokeWidth = stroke.width,
+            cap = StrokeCap.Round
+        )
+    }
+}

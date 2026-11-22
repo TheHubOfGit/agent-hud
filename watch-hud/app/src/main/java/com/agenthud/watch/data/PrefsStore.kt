@@ -57,6 +57,16 @@ class PrefsStore(context: Context) {
         get() = prefs.getBoolean("vertical_pages", false)
         set(value) = prefs.edit().putBoolean("vertical_pages", value).apply()
 
+    /** Live Mode: crown steps thinking level in the focused Mac app; crown click toggles voice auto-send. */
+    var liveMode: Boolean
+        get() = prefs.getBoolean("live_mode", false)
+        set(value) = prefs.edit().putBoolean("live_mode", value).apply()
+
+    /** Index into [VOICE_TRIGGER_MODES]; 0 = Off (default: click to start, click to send). */
+    var voiceTriggerMode: Int
+        get() = prefs.getInt("voice_trigger_mode", 0).coerceIn(0, VOICE_TRIGGER_MODES.size - 1)
+        set(value) = prefs.edit().putInt("voice_trigger_mode", value.coerceIn(0, VOICE_TRIGGER_MODES.size - 1)).apply()
+
     // ---- Vibration & alerts ----
     /** Show a full-screen "done" card (and wake the screen) when an agent finishes its turn. */
     var doneAlert: Boolean
@@ -102,6 +112,14 @@ class PrefsStore(context: Context) {
             "Charging only" to 0,
             "Off charger: 2 min" to 2,
             "Off charger: 5 min" to 5
+        )
+        /** Label to protocol key for optional Live Mode end-of-dictation voice send trigger. */
+        val VOICE_TRIGGER_MODES: List<Pair<String, String>> = listOf(
+            "Off" to "off",
+            "Send" to "send",
+            "Go" to "go",
+            "Okay" to "okay",
+            "All" to "all"
         )
     }
 }

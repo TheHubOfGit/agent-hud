@@ -11,6 +11,9 @@ mac-app/.build/
 mac-app/build/
 mac-app/Resources/AppIcon.iconset/
 firmware-mod/out/
+firmware-mod/stock/
+firmware-mod/tools/
+*.img
 
 # Dependencies and large assets
 mac-agent-bridge/node_modules/
@@ -33,3 +36,4 @@ firmware-mod/module/adbkey.pub
 *.iml
 *.log
 mac-agent-bridge/swift/transcribe
+mac-agent-bridge/swift/live-ctrl
