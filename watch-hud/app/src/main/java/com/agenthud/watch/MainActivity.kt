@@ -31,6 +31,13 @@ import com.agenthud.watch.service.WifiRequester
 import com.agenthud.watch.ui.HudRoot
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        /** The one live HUD instance; a second launch (another task) must not open a second bridge socket. */
+        private var live: java.lang.ref.WeakReference<MainActivity>? = null
+    }
+
+    /** True when this instance lost to an already-running one and only exists to finish itself. */
+    private var duplicate = false
     private lateinit var prefs: PrefsStore
     private lateinit var bridge: BridgeClient
     private lateinit var haptics: HapticsEngine
@@ -73,6 +80,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val other = live?.get()
+        if (other != null && other !== this && !other.isFinishing && !other.isDestroyed) {
+            duplicate = true
+            finish()
+            return
+        }
+        live = java.lang.ref.WeakReference(this)
 
         prefs = PrefsStore(this)
         screenMode = prefs.screenMode
@@ -219,6 +234,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        if (duplicate) return
         started = true
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
@@ -228,13 +244,20 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        started = false
-        runCatching { unregisterReceiver(screenReceiver) }
-        wifi.release()
+        if (!duplicate) {
+            started = false
+            runCatching { unregisterReceiver(screenReceiver) }
+            wifi.release()
+        }
         super.onStop()
     }
 
     override fun onDestroy() {
+        if (duplicate) {
+            super.onDestroy()
+            return
+        }
+        if (live?.get() === this) live = null
         screenHandler.removeCallbacks(screenTimeoutCheck)
         runCatching { unregisterReceiver(batteryReceiver) }
         bridge.stop()

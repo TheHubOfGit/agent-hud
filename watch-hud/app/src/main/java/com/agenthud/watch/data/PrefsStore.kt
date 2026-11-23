@@ -57,6 +57,16 @@ class PrefsStore(context: Context) {
         get() = prefs.getBoolean("vertical_pages", false)
         set(value) = prefs.edit().putBoolean("vertical_pages", value).apply()
 
+    /**
+     * When an agent asks a question or needs an approval: false (default) = stay on Home, which
+     * raises the amber aurora (tap to open); true = open that agent's page, then return Home once
+     * it is answered, here or on the laptop. Buzz and wake-up happen either way, and errors never
+     * move the page.
+     */
+    var autoOpenAgent: Boolean
+        get() = prefs.getBoolean("auto_open_agent", false)
+        set(value) = prefs.edit().putBoolean("auto_open_agent", value).apply()
+
     /** Live Mode: crown steps thinking level in the focused Mac app; crown click toggles voice auto-send. */
     var liveMode: Boolean
         get() = prefs.getBoolean("live_mode", false)

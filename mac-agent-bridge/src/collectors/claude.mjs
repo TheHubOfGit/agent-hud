@@ -241,9 +241,12 @@ export class ClaudeCollector {
       if (!parsed) continue;
       parsed.filePath = f.filePath;
       if (link) {
-        parsed.title = link.title.slice(0, 48);
+        // The Desktop record's title wins when it has one. When it does not, its "title" is just the
+        // folder name, and that must not hide the title Claude Code wrote into the transcript.
+        if (link.titleIsReal || !parsed._titleIsReal) parsed.title = link.title.slice(0, 48);
         parsed.providerLabel = 'Claude Code';
       }
+      delete parsed._titleIsReal;
       if (existing) {
         // The tail often ends in tool results with no assistant line; keep the last real step
         // instead of flapping back to the placeholder.
@@ -300,6 +303,7 @@ export class ClaudeCollector {
           sessionId: String(d.sessionId || path.basename(filePath, '.json')),
           cliSessionId: d.cliSessionId ? String(d.cliSessionId) : null,
           title: String(d.title || (d.cwd ? path.basename(d.cwd) : 'Claude Desktop')),
+          titleIsReal: Boolean(d.title), // false: the title above is only the folder name
           isArchived: Boolean(d.isArchived),
           lastActivityAt: Number(d.lastActivityAt || d.lastTurnEdgeAt || mtimeMs),
         };
@@ -347,6 +351,10 @@ export class ClaudeCollector {
       const projectName = path.basename(path.dirname(filePath)).replace(/^-Users-[^-]+-Documents-Projects-/, '').replace(/-/g, ' ');
       const looksLikeUuid = /^[0-9a-f]{8}\s+[0-9a-f]{4}/i.test(projectName);
       let title = (projectName && !looksLikeUuid && projectName.length < 40) ? projectName : (source === 'desktop' ? 'Claude Desktop' : 'Claude Code');
+      // Claude Code writes the conversation's title into the transcript as `custom-title` (a name
+      // the person or the app set) or `ai-title` (generated) records, repeated as the session goes on.
+      let customTitle = '';
+      let aiTitle = '';
       let step = 'Active session';
       let status = 'idle';
       let prompt = null;
@@ -360,6 +368,8 @@ export class ClaudeCollector {
         try {
           const obj = JSON.parse(line);
           if (obj.title) title = String(obj.title).slice(0, 44);
+          if (obj.type === 'custom-title' && typeof obj.customTitle === 'string' && obj.customTitle.trim()) customTitle = obj.customTitle.trim();
+          else if (obj.type === 'ai-title' && typeof obj.aiTitle === 'string' && obj.aiTitle.trim()) aiTitle = obj.aiTitle.trim();
           if ((obj.type === 'assistant' || obj.type === 'user') && !obj.isSidechain) lastTurnLine = obj;
           if (obj.type === 'assistant' && obj.message?.content) {
             const blocks = Array.isArray(obj.message.content) ? obj.message.content : [];
@@ -417,6 +427,9 @@ export class ClaudeCollector {
       if (status === 'running') timeSensitive = true;
       if (status === 'running' && silentMs > 15 * 60_000) status = 'idle';
 
+      const realTitle = customTitle || aiTitle; // a name someone chose beats a generated one
+      if (realTitle) title = realTitle;
+
       return {
         id: `claude:${sessionId}`,
         rawId: sessionId,
@@ -424,6 +437,7 @@ export class ClaudeCollector {
         providerLabel: source === 'desktop' ? 'Claude Desktop' : 'Claude Code',
         source,
         title: title.slice(0, 48),
+        _titleIsReal: Boolean(realTitle),
         status,
         step,
         prompt,

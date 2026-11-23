@@ -95,6 +95,7 @@ fun HudRoot(
     var showVibration by remember { mutableStateOf(false) }
     var quotaRings by remember { mutableStateOf(prefs.quotaRings) }
     var verticalPages by remember { mutableStateOf(prefs.verticalPages) }
+    var autoOpenAgent by remember { mutableStateOf(prefs.autoOpenAgent) }
     var liveMode by remember { mutableStateOf(prefs.liveMode) }
     var voiceTriggerMode by remember { mutableIntStateOf(prefs.voiceTriggerMode) }
     var liveVoiceState by remember { mutableStateOf<LiveVoiceState>(LiveVoiceState.Idle) }
@@ -238,6 +239,8 @@ fun HudRoot(
     var lastFirstApprovalId by remember { mutableStateOf<String?>(null) }
     var lastApprovalQueueSize by remember { mutableIntStateOf(0) }
     var lastErrorCount by remember { mutableIntStateOf(0) }
+    // True once "Open agent" took the screen to an agent's page; cleared when we send it back Home.
+    var autoOpened by remember { mutableStateOf(false) }
 
     LaunchedEffect(snapshot.approvalQueue, snapshot.errorCount) {
         val queue = snapshot.approvalQueue
@@ -253,13 +256,18 @@ fun HudRoot(
         } else if (firstId != null) {
             val targetIdx = snapshot.threads.indexOfFirst { it.id == firstId }
             if (firstId != lastFirstApprovalId) {
-                // Brand new oldest approval (either first arrival or advanced after resolving previous)
+                // Brand new oldest approval (either first arrival or advanced after resolving previous).
+                // The alert always happens. Taking you to the agent's page only when "Open agent" is
+                // chosen: otherwise Home shows the amber aurora and "N waiting on you", and a tap opens it.
                 nightMode = false
-                showControls = false
                 onWakeScreen()
                 if (!isMuted) haptics.buzzApproval()
-                if (targetIdx >= 0) {
-                    pagerState.animateScrollToPage(agentBase + targetIdx)
+                if (autoOpenAgent) {
+                    showControls = false
+                    if (targetIdx >= 0) {
+                        autoOpened = true
+                        pagerState.animateScrollToPage(agentBase + targetIdx)
+                    }
                 }
             } else if (queue.size > lastApprovalQueueSize) {
                 // A 2nd/3rd approval arrived while 1st is still pending:
@@ -267,16 +275,19 @@ fun HudRoot(
                 if (!isMuted) haptics.buzzQueuedTick()
             }
         } else if (lastFirstApprovalId != null) {
-            // Queue cleared cleanly! Soft confirmation & return Home
+            // Queue cleared cleanly! Soft confirmation, and back Home if we had taken you away.
             if (!isMuted) haptics.buzzCleared()
-            pagerState.animateScrollToPage(homePage)
+            // Answered here or on the laptop: back to the main Home screen.
+            if (autoOpenAgent && autoOpened) {
+                autoOpened = false
+                pagerState.animateScrollToPage(homePage)
+            }
         } else if (snapshot.errorCount > lastErrorCount) {
             // New build/agent error
             nightMode = false
             onWakeScreen()
             if (!isMuted) haptics.buzzError()
-            val errIdx = snapshot.threads.indexOfFirst { it.isError }
-            if (errIdx >= 0) pagerState.animateScrollToPage(agentBase + errIdx)
+            // Errors wake and buzz, and Home turns red; they never move the page.
         }
 
         lastFirstApprovalId = firstId
@@ -588,6 +599,12 @@ fun HudRoot(
                 verticalPages = !verticalPages
                 prefs.verticalPages = verticalPages
                 showControls = false
+                haptics.tapTick()
+            },
+            autoOpen = autoOpenAgent,
+            onToggleAutoOpen = {
+                autoOpenAgent = !autoOpenAgent
+                prefs.autoOpenAgent = autoOpenAgent
                 haptics.tapTick()
             },
             asPage = asPage,

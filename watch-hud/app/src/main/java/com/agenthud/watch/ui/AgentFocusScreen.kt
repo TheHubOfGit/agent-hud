@@ -125,7 +125,7 @@ fun AgentFocusTile(
                 verticalArrangement = Arrangement.Center
             ) {
                 Text(
-                    text = thread.title,
+                    text = plainText(thread.title),
                     fontSize = 16.sp,
                     lineHeight = 19.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -137,7 +137,7 @@ fun AgentFocusTile(
                 Spacer(Modifier.height(5.dp))
                 if (thread.isWaiting || thread.isError) {
                     Text(
-                        text = thread.prompt ?: thread.step,
+                        text = plainText(thread.prompt ?: thread.step),
                         fontSize = 12.sp,
                         lineHeight = 15.sp,
                         color = Color(0xFFF1F3F4),
@@ -150,7 +150,7 @@ fun AgentFocusTile(
                     val steps = if (recentSteps.isEmpty()) listOf(thread.step) else recentSteps.reversed()
                     steps.forEachIndexed { i, s ->
                         Text(
-                            text = s,
+                            text = plainText(s),
                             fontSize = if (i == 0) 12.sp else 11.sp,
                             lineHeight = 15.sp,
                             color = if (i == 0) Color(0xFFBDC1C6) else Color(0xFF5F6368),
@@ -277,7 +277,7 @@ private fun ChoiceQuestion(
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Text(
-            text = thread.prompt ?: thread.step,
+            text = plainText(thread.prompt ?: thread.step),
             fontSize = 13.sp,
             lineHeight = 16.sp,
             fontWeight = FontWeight.Medium,
@@ -313,7 +313,7 @@ private fun ChoiceQuestion(
                     Box(Modifier.size(6.dp).clip(CircleShape).background(ColorGreen))
                 }
                 Text(
-                    text = label,
+                    text = plainText(label),
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
                     color = if (sent != null && !chosen) Color(0xFF5F6368) else Color.White,

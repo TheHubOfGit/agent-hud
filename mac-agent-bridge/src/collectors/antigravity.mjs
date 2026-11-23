@@ -22,6 +22,91 @@ function parseAskQuestions(call) {
   return Array.isArray(qs) ? qs : [];
 }
 
+// ---- Antigravity's own conversation titles ---------------------------------------------------------
+// The app keeps one summary per conversation in agyhub_summaries_proto.pb, an undocumented protobuf:
+// repeated field 1 = { 1: conversation id, 2: summary }. In a summary, field 1 is the title the app
+// shows (15.1 repeats it); a sub-agent run has no title of its own and carries its task name at 17.8.2.
+// Decoded defensively: anything unexpected just means "no title", and the first-prompt fallback applies.
+const HUB_SUMMARIES = path.join(os.homedir(), '.gemini/antigravity/agyhub_summaries_proto.pb');
+
+function* pbFields(buf) {
+  let i = 0;
+  const varint = () => {
+    let v = 0, shift = 0, b;
+    do {
+      b = buf[i++];
+      if (b === undefined) return null;
+      v += (b & 0x7f) * 2 ** shift;
+      shift += 7;
+    } while (b & 0x80);
+    return v;
+  };
+  while (i < buf.length) {
+    const key = varint();
+    if (key === null) return;
+    const field = Math.floor(key / 8), wire = key % 8;
+    if (field === 0) return;
+    if (wire === 0) {
+      const v = varint();
+      if (v === null) return;
+      yield [field, wire, v];
+    } else if (wire === 2) {
+      const n = varint();
+      if (n === null || i + n > buf.length) return;
+      yield [field, wire, buf.subarray(i, i + n)];
+      i += n;
+    } else if (wire === 1) i += 8;
+    else if (wire === 5) i += 4;
+    else return;
+  }
+}
+
+function pbFirst(buf, field) {
+  if (!buf) return null;
+  for (const [f, w, v] of pbFields(buf)) if (f === field && w === 2) return v;
+  return null;
+}
+
+// A field is a title only if it decodes as clean text. A nested message would show control bytes (or
+// start with a tag byte such as a newline), so those are refused; line breaks inside real text, as in a
+// multi-line first prompt that Antigravity uses as a title, are folded into spaces.
+function pbText(v) {
+  if (!v) return '';
+  const s = v.toString('utf8');
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffd]/.test(s) || /^\s/.test(s)) return '';
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function titleOfSummary(summary) {
+  return pbText(pbFirst(summary, 1)) ||
+    pbText(pbFirst(pbFirst(summary, 15), 1)) ||
+    pbText(pbFirst(pbFirst(pbFirst(summary, 17), 8), 2));
+}
+
+let hubCache = { mtimeMs: 0, size: -1, titles: new Map() };
+
+/** conversation id -> the title Antigravity shows for it. Re-read only when the file changes. */
+export function readHubTitles(file = HUB_SUMMARIES) {
+  try {
+    const st = fs.statSync(file);
+    if (st.mtimeMs === hubCache.mtimeMs && st.size === hubCache.size) return hubCache.titles;
+    const data = fs.readFileSync(file);
+    const titles = new Map();
+    for (const [f, w, entry] of pbFields(data)) {
+      if (f !== 1 || w !== 2) continue;
+      const id = pbText(pbFirst(entry, 1));
+      const summary = pbFirst(entry, 2);
+      if (!/^[0-9a-f-]{36}$/.test(id) || !summary) continue;
+      const title = titleOfSummary(summary);
+      if (title) titles.set(id, title);
+    }
+    hubCache = { mtimeMs: st.mtimeMs, size: st.size, titles };
+    return titles;
+  } catch {
+    return hubCache.titles; // unreadable right now (mid-write, or absent): keep what we had
+  }
+}
+
 export class AntigravityCollector {
   constructor(onChange) {
     this.onChange = onChange;
@@ -347,6 +432,13 @@ export class AntigravityCollector {
   }
 
   publish() {
+    // The title Antigravity itself shows, once it has one. Until then the first prompt stands in
+    // (a brand-new conversation has no summary yet).
+    const hubTitles = readHubTitles();
+    for (const cur of this.states.values()) {
+      const real = hubTitles.get(cur.rawId);
+      if (real) cur.title = real.slice(0, 48);
+    }
     // States are updated in place, so comparing against the previous array would compare an
     // object with itself and miss changes. Compare serialized snapshots instead.
     const next = [...this.states.values()].sort((a, b) => b.updatedAtMs - a.updatedAtMs);

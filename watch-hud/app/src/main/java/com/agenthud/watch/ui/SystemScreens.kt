@@ -71,6 +71,8 @@ fun QuickControlsOverlay(
     onCycleVoiceTrigger: () -> Unit = {},
     verticalPages: Boolean = false,
     onTogglePages: () -> Unit = {},
+    autoOpen: Boolean = false,
+    onToggleAutoOpen: () -> Unit = {},
     /** Shown as a page of the vertical pager rather than as a pop-up over the HUD. */
     asPage: Boolean = false,
     pageActive: Boolean = true
@@ -261,6 +263,21 @@ fun QuickControlsOverlay(
             ) {
                 Text(text = "Pages", fontSize = 12.sp, color = Color(0xFFDADCE0), fontWeight = FontWeight.Medium)
                 Text(text = if (verticalPages) "Vertical" else "Side", fontSize = 11.sp, color = ColorBlue)
+            }
+
+            // Whether an agent that needs you (or errors) opens its own page. Off keeps you on Home.
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(Color(0xFF16181C))
+                    .clickable { onToggleAutoOpen() }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "Needs you", fontSize = 12.sp, color = Color(0xFFDADCE0), fontWeight = FontWeight.Medium)
+                Text(text = if (autoOpen) "Open agent" else "Stay home", fontSize = 11.sp, color = if (autoOpen) ColorBlue else ColorMuted)
             }
 
             // Opens the full Vibration settings screen.
@@ -665,7 +682,7 @@ fun DoneAlertScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
-                text = thread.title,
+                text = plainText(thread.title),
                 fontSize = 16.sp,
                 lineHeight = 19.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -676,7 +693,7 @@ fun DoneAlertScreen(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = thread.step,
+                text = plainText(thread.step),
                 fontSize = 12.sp,
                 lineHeight = 15.sp,
                 color = Color(0xFFBDC1C6),
