@@ -39,13 +39,13 @@ jobs:
       - name: Build signed release APK
         working-directory: watch-hud
         env:
-          CI_VERSION_CODE: ${{ 10 + github.run_number }}
           CI_VERSION_NAME: 1.0.${{ github.run_number }}
           RELEASE_KEYSTORE_FILE: /tmp/release.jks
           RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
           RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
+          export CI_VERSION_CODE=$((10 + GITHUB_RUN_NUMBER))
           chmod +x gradlew
           ./gradlew assembleRelease --no-daemon
 
