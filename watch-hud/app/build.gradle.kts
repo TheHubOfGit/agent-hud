@@ -18,11 +18,23 @@ android {
         applicationId = "com.agenthud.watch"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = System.getenv("CI_VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("CI_VERSION_NAME") ?: "1.0.0"
 
         buildConfigField("String", "DEFAULT_AUTH_TOKEN", "\"$defaultToken\"")
         buildConfigField("int", "DEFAULT_PORT", "8765")
+    }
+
+    val releaseKeystorePath = System.getenv("RELEASE_KEYSTORE_FILE")
+    signingConfigs {
+        if (!releaseKeystorePath.isNullOrBlank()) {
+            create("release") {
+                storeFile = file(releaseKeystorePath)
+                storePassword = System.getenv("RELEASE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -31,8 +43,12 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Signed with the local debug key so it installs over the debug build.
-            signingConfig = signingConfigs.getByName("debug")
+            // Signed with the release keystore in CI, or local debug key for local installs.
+            signingConfig = if (!releaseKeystorePath.isNullOrBlank()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
