@@ -123,20 +123,15 @@ fun CurvedTopLabel(
 /**
  * Calm "working" indicator: a short comet head with a faint tail making one lap every 8s.
  * When the agent has gone quiet ([stalled]) the comet freezes and dims so a hung agent
- * reads differently from a busy one.
+ * reads differently from a busy one. [fps] caps the redraw rate (see rememberAnimClock).
  */
 @Composable
-fun OrbitingArc(color: Color, stalled: Boolean, strokeDp: Float = 4f) {
-    val infinite = rememberInfiniteTransition(label = "comet")
-    val angle by infinite.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(tween(8000, easing = LinearEasing), RepeatMode.Restart),
-        label = "cometAngle"
-    )
+fun OrbitingArc(color: Color, stalled: Boolean, strokeDp: Float = 4f, fps: Int = 60) {
+    val clock = rememberAnimClock(active = !stalled, fps = fps)
     Canvas(modifier = Modifier.fillMaxSize()) {
         val (stroke, topLeft, arcSize) = ringGeometry(strokeDp)
         drawArc(ColorTrack, 0f, 360f, false, topLeft, arcSize, style = Stroke(stroke))
+        val angle = (clock.value / 8f % 1f) * 360f // one lap every 8 s
         val head = if (stalled) -90f else angle - 90f
         val headColor = if (stalled) color.copy(alpha = 0.4f) else color
         drawArc(headColor.copy(alpha = headColor.alpha * 0.22f), head - 62f, 62f, false, topLeft, arcSize,

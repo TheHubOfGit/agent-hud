@@ -68,7 +68,7 @@ fun LiveModeScreen(
     val shownLevel = liveState.levels.getOrNull(shownIdx) ?: liveState.level
     val isPending = previewIndex != null && previewIndex != liveState.index
     val animateDial = liveState.dialSupported && (style.stops != null || stepInFlight || isPending)
-    val clock = rememberAnimClock(animateDial)
+    val clock = rememberAnimClock(animateDial, fps = 15)
 
     val displayApp = liveState.appName
         .removeSuffix(" (Beta)")
@@ -144,7 +144,7 @@ fun LiveModeScreen(
             }
 
             is LiveVoiceState.Sending -> {
-                OrbitingArc(color = ColorBlue, stalled = false, strokeDp = 4.5f)
+                OrbitingArc(color = ColorBlue, stalled = false, strokeDp = 4.5f, fps = 30)
                 CurvedTopLabel(
                     text = "SENDING",
                     color = ColorBlue,
