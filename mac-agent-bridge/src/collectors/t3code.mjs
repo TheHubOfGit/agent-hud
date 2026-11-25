@@ -68,6 +68,19 @@ export class T3CodeCollector {
       } catch {
         // Optional tables
       }
+      try {
+        // The ids above are T3's wrapped refs ("provider-thread:…native-thread:pending%3Arun…"),
+        // never the provider's own session id. The real Claude/Codex session id — the one their
+        // transcripts are named by — lives in payload_json.nativeThreadRef.nativeId.
+        for (const r of db.prepare(`
+          SELECT thread_id, json_extract(payload_json, '$.nativeThreadRef.nativeId') AS native_id
+          FROM orchestration_v2_projection_provider_threads
+          WHERE json_extract(payload_json, '$.nativeThreadRef.nativeId') IS NOT NULL`).all()) {
+          addOwned(r.thread_id, r.native_id);
+        }
+      } catch {
+        // Older T3 schema without provider_threads
+      }
 
       // T3 moved threads to orchestration_v2_projection_threads; the old projection_threads
       // table stopped updating, so read v2 and fall back only if it doesn't exist.
