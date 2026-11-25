@@ -7,6 +7,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.delay
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
@@ -89,18 +90,32 @@ fun rememberProviderMarks(): Map<Int, ImageBitmap> {
 }
 
 /**
- * Seconds since the layout started animating, advancing every frame only while [active] (an agent
- * is working, waiting or erroring). Read it inside a draw lambda so only drawing re-runs.
+ * Seconds since the layout started animating, advancing only while [active] (an agent is working,
+ * waiting or erroring). Read it inside a draw lambda so only drawing re-runs.
+ *
+ * [fps] caps how often it advances, and so how often the screen redraws. Below the display's rate
+ * the loop sleeps between frames instead of waking every vsync: these animations are slow, and
+ * redrawing at 60 fps for hours kept the watch's CPU and GPU busy and the watch hot.
  */
 @Composable
-fun rememberAnimClock(active: Boolean): State<Float> {
+fun rememberAnimClock(active: Boolean, fps: Int = 60): State<Float> {
     val clock = remember { mutableFloatStateOf(0f) }
-    LaunchedEffect(active) {
+    LaunchedEffect(active, fps) {
         if (!active) return@LaunchedEffect
         val startNanos = withFrameNanos { it }
         val offset = clock.floatValue
+        val tick = { now: Long -> clock.floatValue = offset + (now - startNanos) / 1_000_000_000f; now }
+        if (fps >= 60) {
+            while (true) withFrameNanos(tick)
+        }
+        val intervalNs = 1_000_000_000L / fps
+        var target = startNanos
         while (true) {
-            withFrameNanos { now -> clock.floatValue = offset + (now - startNanos) / 1_000_000_000f }
+            val now = withFrameNanos(tick)
+            while (target <= now) target += intervalNs
+            // Wake half a 60 Hz frame early so the next vsync lands on (not after) the target.
+            val waitMs = (target - System.nanoTime() - 8_000_000L) / 1_000_000L
+            if (waitMs > 0) delay(waitMs)
         }
     }
     return clock

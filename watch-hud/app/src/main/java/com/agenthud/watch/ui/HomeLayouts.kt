@@ -154,7 +154,7 @@ private fun HomeLayoutPulseA(
     val styles = threads.map { providerStyle(it.provider, it.accentColor) }
     val marks = rememberProviderMarks()
     val anyActive = threads.any { it.markState() != MarkState.IDLE }
-    val clock = rememberAnimClock(anyActive)
+    val clock = rememberAnimClock(anyActive, fps = 15)
     val onSelect by rememberUpdatedState(onSelectThread)
     val waitingIdx = snapshot.threads.indexOfFirst { it.id == snapshot.approvalQueue.firstOrNull() }
     val count = threads.size
@@ -232,7 +232,7 @@ private fun HomeLayoutOrbitB(
     val styles = threads.map { providerStyle(it.provider, it.accentColor) }
     val marks = rememberProviderMarks()
     val anyActive = threads.any { it.markState() != MarkState.IDLE }
-    val clock = rememberAnimClock(anyActive)
+    val clock = rememberAnimClock(anyActive, fps = 30)
     val onSelect by rememberUpdatedState(onSelectThread)
     val waitingIdx = snapshot.threads.indexOfFirst { it.id == snapshot.approvalQueue.firstOrNull() }
     val count = threads.size
