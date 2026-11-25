@@ -31,8 +31,41 @@ function findWhisperBin() {
   return 'whisper-cli';
 }
 
-export async function transcribeWavBuffer(wavBuffer) {
-  const tmpFile = path.join(os.tmpdir(), `agenthud_voice_${Date.now()}.wav`);
+// ITU-T G.711 µ-law -> 16-bit linear PCM lookup table (256 entries).
+const MULAW_TABLE = new Int16Array(256);
+for (let i = 0; i < 256; i++) {
+  const u = (~i) & 0xff;
+  const sign = u & 0x80;
+  const exponent = (u >> 4) & 0x07;
+  const mantissa = u & 0x0f;
+  let sample = ((mantissa << 3) + 0x84) << exponent;
+  sample -= 0x84;
+  MULAW_TABLE[i] = sign ? -sample : sample;
+}
+
+/** Wraps raw 16kHz 8-bit µ-law bytes as a standard 16kHz 16-bit mono PCM WAV for whisper-cli. */
+export function decodeMulawToWav(mulawBuf, sampleRate = 16000) {
+  const n = mulawBuf.length;
+  const out = Buffer.alloc(44 + n * 2);
+  out.write('RIFF', 0);
+  out.writeUInt32LE(36 + n * 2, 4);
+  out.write('WAVEfmt ', 8);
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20);              // PCM
+  out.writeUInt16LE(1, 22);              // mono
+  out.writeUInt32LE(sampleRate, 24);
+  out.writeUInt32LE(sampleRate * 2, 28); // byte rate
+  out.writeUInt16LE(2, 32);              // block align
+  out.writeUInt16LE(16, 34);             // bits per sample
+  out.write('data', 36);
+  out.writeUInt32LE(n * 2, 40);
+  for (let i = 0; i < n; i++) out.writeInt16LE(MULAW_TABLE[mulawBuf[i]], 44 + i * 2);
+  return out;
+}
+
+export async function transcribeWavBuffer(audioBuffer, contentType = 'audio/wav') {
+  const wavBuffer = /mulaw/i.test(String(contentType || '')) ? decodeMulawToWav(audioBuffer) : audioBuffer;
+  const tmpFile = path.join(os.tmpdir(), `agenthud_voice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`);
   fs.writeFileSync(tmpFile, wavBuffer);
 
   try {

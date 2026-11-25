@@ -405,7 +405,7 @@ export class ClaudeCollector {
           const q = ask.input?.questions?.[0];
           prompt = q?.question || 'Claude asked a question';
           choices = (Array.isArray(q?.options) ? q.options : [])
-            .map(o => String(o?.label || '').trim().slice(0, 40))
+            .map(o => String(o?.label || '').trim().slice(0, 200))
             .filter(Boolean)
             .slice(0, 4);
           multiSelect = Boolean(q?.multiSelect);

@@ -961,6 +961,156 @@ func stepThinking(delta: Int, targetLevel: String? = nil, targetIndex: Int? = ni
     ]
 }
 
+// ---- Agent Threads (wrist app): answer a question / reply in a specific conversation ----------
+
+func runningApp(named wanted: String) -> NSRunningApplication? {
+    let apps = NSWorkspace.shared.runningApplications
+    return apps.first { ($0.localizedName ?? "") == wanted }
+        ?? apps.first { ($0.localizedName ?? "").lowercased().hasPrefix(wanted.lowercased()) }
+}
+
+func normLabel(_ s: String) -> String {
+    s.lowercased().split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+}
+
+/// Presses the enabled button labelled [label] in [appName] (an answer to an open question). When
+/// several match (an old answered question can still show the same choice), the lowest one on screen,
+/// the newest, wins. Nothing is pressed if no button carries that label.
+func pressChoice(appName: String, label: String, windowTitle: String = "") -> [String: Any] {
+    guard AXIsProcessTrusted() else { return ["ok": false, "error": "Mac needs Accessibility permission for Agent HUD"] }
+    guard let app = runningApp(named: appName) else { return ["ok": false, "error": "\(appName) isn't open on the Mac"] }
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    enableManualAccessibility(axApp)
+    let want = normLabel(label)
+    guard !want.isEmpty else { return ["ok": false, "error": "No choice given"] }
+    // With a title, only the window showing that conversation counts: the same label ("Yes") in another
+    // conversation must never be pressed.
+    var windows = allWindows(of: axApp)
+    if !windowTitle.isEmpty {
+        windows = windows.filter { axString($0, kAXTitleAttribute) == windowTitle }
+        if windows.isEmpty { return ["ok": false, "notShown": true, "error": "That conversation isn't open in \(appName)"] }
+    }
+    for win in windows {
+        let nodes = walkInteractive(win, roles: ["AXButton", "AXRadioButton", "AXCheckBox"], maxNodes: 9000, maxDepth: 44)
+            .filter { axBool($0.element, kAXEnabledAttribute) != false }
+        func labels(_ n: AXNodeInfo) -> [String] { [n.title, n.desc, n.text].map(normLabel) }
+        let exact = nodes.filter { labels($0).contains(want) }
+        let prefixed = nodes.filter { labels($0).contains { $0.hasPrefix(want + " ") } }
+        if let n = (exact.isEmpty ? prefixed : exact).max(by: { $0.frame.minY < $1.frame.minY }) {
+            // AXPress only. Falling back to a mouse click could land on whatever app is in front.
+            let err = AXUIElementPerformAction(n.element, kAXPressAction as CFString)
+            if err != .success { return ["ok": false, "error": "\(appName) didn't accept the press"] }
+            return ["ok": true, "pressed": String(n.text.prefix(80))]
+        }
+    }
+    return ["ok": false, "notShown": true, "error": "That question isn't on screen in \(appName)"]
+}
+
+/// Types [text] into the message box of the conversation [appName]'s front window shows, and sends
+/// it, only if the window title is exactly [windowTitle] and the box is empty (never sends a draft
+/// the person left there). The app that was in front gets focus back afterward.
+/// Text compared loosely: editors turn line breaks and spaces into their own variants.
+func normText(_ s: String) -> String {
+    s.replacingOccurrences(of: "\u{00A0}", with: " ")
+        .components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+}
+
+/// [anyBox]: the app has one window for every chat (no title to check), so use its chat box: the
+/// lowest wide text box in the bottom part of the window. [dryRun]: find the box, report, change nothing.
+func composeIn(appName: String, windowTitle: String, text: String, anyBox: Bool = false, dryRun: Bool = false) -> [String: Any] {
+    guard AXIsProcessTrusted() else { return ["ok": false, "error": "Mac needs Accessibility permission for Agent HUD"] }
+    guard let app = runningApp(named: appName) else { return ["ok": false, "notShown": true, "error": "\(appName) isn't open"] }
+    let axApp = AXUIElementCreateApplication(app.processIdentifier)
+    enableManualAccessibility(axApp)
+    // With a title: the window showing that conversation, wherever it is in the window stack (a panel
+    // in front shouldn't force the fallback). Without one: the front window.
+    let candidate: AXUIElement? = anyBox
+        ? frontmostWindow(of: axApp)
+        : allWindows(of: axApp).first { axString($0, kAXTitleAttribute) == windowTitle }
+    guard let win = candidate else {
+        let front = frontmostWindow(of: axApp).map { axString($0, kAXTitleAttribute) } ?? ""
+        return ["ok": false, "notShown": true, "error": anyBox ? "\(appName) has no window" : "That conversation isn't open in \(appName)", "windowTitle": front]
+    }
+    let title = axString(win, kAXTitleAttribute)
+    let all = walkInteractive(win, roles: ["AXTextArea", "AXTextField"], maxNodes: 9000, maxDepth: 44)
+    let winFrame = axFrame(win)
+    let boxes: [AXNodeInfo]
+    if anyBox {
+        let lowerHalf = winFrame.minY + winFrame.height * 0.45
+        boxes = all.filter { $0.frame.width >= 160 && $0.frame.height >= 16 && $0.frame.minY >= lowerHalf }
+    } else {
+        boxes = all.filter { $0.desc.hasPrefix("Message") }
+    }
+    guard let box = boxes.max(by: { $0.frame.minY < $1.frame.minY }) else {
+        return ["ok": false, "notShown": true, "error": "No message box", "windowTitle": title]
+    }
+    let existing = axString(box.element, kAXValueAttribute)
+    if dryRun {
+        return ["ok": true, "dryRun": true, "windowTitle": title, "boxDesc": box.desc, "boxRole": box.role,
+                "boxEmpty": normText(existing).isEmpty, "frame": ["x": Int(box.frame.minX), "y": Int(box.frame.minY), "w": Int(box.frame.width), "h": Int(box.frame.height)]]
+    }
+    if !normText(existing).isEmpty {
+        return ["ok": false, "notShown": true, "draft": true, "error": "A draft is in the message box"]
+    }
+    let previous = NSWorkspace.shared.frontmostApplication
+    if previous?.processIdentifier != app.processIdentifier {
+        app.activate(options: [])
+        _ = pollUntil(maxUs: 1_200_000) { NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier ? true : nil }
+    }
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+        return ["ok": false, "notShown": true, "error": "\(appName) didn't come to the front"]
+    }
+    // Bring that window forward, then make sure it really is the one in front before typing.
+    AXUIElementPerformAction(win, kAXRaiseAction as CFString)
+    AXUIElementSetAttributeValue(win, kAXMainAttribute as CFString, kCFBooleanTrue)
+    usleep(120_000)
+    if !anyBox, let front = frontmostWindow(of: axApp), axString(front, kAXTitleAttribute) != windowTitle {
+        if let prev = previous, prev.processIdentifier != app.processIdentifier { prev.activate(options: []) }
+        return ["ok": false, "notShown": true, "error": "Couldn't bring that conversation forward"]
+    }
+    AXUIElementSetAttributeValue(box.element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    usleep(150_000)
+
+    let pb = NSPasteboard.general
+    var saved: [NSPasteboardItem] = []
+    for it in pb.pasteboardItems ?? [] {
+        let copy = NSPasteboardItem()
+        for t in it.types { if let d = it.data(forType: t) { copy.setData(d, forType: t) } }
+        saved.append(copy)
+    }
+    func restore() {
+        pb.clearContents()
+        if !saved.isEmpty { pb.writeObjects(saved) }
+        if let prev = previous, prev.processIdentifier != app.processIdentifier { prev.activate(options: []) }
+    }
+    pb.clearContents()
+    pb.setString(text, forType: .string)
+    usleep(70_000)
+    postKey(keyCode: CGKeyCode(kVK_ANSI_V), flags: .maskCommand)
+    let want = normText(text)
+    let landed = pollUntil(maxUs: 900_000, stepUs: 50_000) { () -> Bool? in
+        normText(axString(box.element, kAXValueAttribute)) == want ? true : nil
+    } ?? false
+    if !landed {
+        // It went somewhere else, or only partly: take back what we pasted (only from this box, and
+        // only while it has focus) and let the caller fall back.
+        var focusedRef: CFTypeRef?
+        let focusedIsBox = AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success
+            && focusedRef != nil && CFEqual(focusedRef!, box.element)
+        if focusedIsBox && normText(axString(box.element, kAXValueAttribute)).hasPrefix(String(want.prefix(12))) {
+            postKey(keyCode: CGKeyCode(kVK_ANSI_A), flags: .maskCommand)
+            postKey(keyCode: CGKeyCode(kVK_Delete), flags: [])
+        }
+        restore()
+        return ["ok": false, "notShown": true, "error": "The text didn't land in the message box"]
+    }
+    usleep(200_000)
+    postKey(keyCode: CGKeyCode(kVK_Return), flags: [])
+    usleep(350_000)
+    restore()
+    return ["ok": true, "typed": true]
+}
+
 func debugAX(targetAppName: String? = nil) -> [String: Any] {
     let trusted = AXIsProcessTrusted()
     let target: NSRunningApplication?
@@ -1156,7 +1306,7 @@ if mode == "watch" {
             // The bridge gives up on a command after its timeout. If one waited in line past that,
             // drop it instead of acting late: the caller was told it failed and may have retried,
             // so running it now would double-send or double-step.
-            if cmd == "paste_send" || cmd == "step",
+            if cmd == "paste_send" || cmd == "step" || cmd == "press_choice" || cmd == "compose_in",
                let deadline = (req["deadlineMs"] as? NSNumber)?.doubleValue,
                Date().timeIntervalSince1970 * 1000 > deadline {
                 resp = ["ok": false, "stale": true, "error": "Request expired before it ran"]
@@ -1180,6 +1330,11 @@ if mode == "watch" {
             case "check_target":
                 let pid = (req["pid"] as? NSNumber)?.int32Value ?? -1
                 resp = checkTarget(bundleId: req["bundleId"] as? String ?? "", name: req["name"] as? String ?? "", expect: req["expect"] as? String, pid: pid)
+            case "press_choice":
+                resp = pressChoice(appName: req["app"] as? String ?? "", label: req["label"] as? String ?? "", windowTitle: req["windowTitle"] as? String ?? "")
+            case "compose_in":
+                resp = composeIn(appName: req["app"] as? String ?? "", windowTitle: req["windowTitle"] as? String ?? "", text: req["text"] as? String ?? "",
+                                 anyBox: req["anyBox"] as? Bool ?? false, dryRun: req["dryRun"] as? Bool ?? false)
             case "debug_ax":
                 let targetApp = req["app"] as? String
                 resp = debugAX(targetAppName: targetApp)

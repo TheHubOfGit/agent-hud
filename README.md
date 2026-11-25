@@ -12,6 +12,8 @@ Three pieces:
 |---|---|
 | `watch-hud/` | The Wear OS app (Kotlin, Jetpack Compose). Runs as the watch's home screen. |
 | `mac-agent-bridge/` | A small Node service on your Mac. Watches each agent's local session files and databases and streams one live snapshot to the watch over Wi-Fi. |
+| `watch-threads/` | **Agent Threads**, the on-the-wrist companion app (Wear OS, Compose): browse, read and reply to conversations. See below. |
+| `relay/` | Cloudflare Worker that lets Agent Threads reach the Mac from any network. |
 | `mac-app/` | **Agent HUD.app**, a menu bar app that runs and supervises the bridge, with a dashboard. |
 | `firmware-mod/` | Experimental root/flash tooling and a no-root de-Google script. See the warning below. |
 
@@ -94,6 +96,60 @@ Test threads never type into any app.
 | Antigravity | The live `steps` table in each conversation's database (`~/.gemini/antigravity/conversations`), plus its transcript for text and questions. |
 | T3 Code | T3's local state database (`orchestration_v2_*` tables). |
 | Quotas | The CodexBar CLI. |
+
+## Agent Threads (on the wrist)
+
+A spinoff for the watch you wear rather than the one on the desk. Where the HUD shows what's happening right now, Agent Threads is for keeping conversations going while you're away from the Mac:
+
+- **Conversations:** every conversation from the last week across T3 Code, Claude Code, Codex and Antigravity, newest first, with anything waiting on you at the top. Tap the chip at the top to show one app at a time.
+- **Reading:** messages appear as bubbles, with tool runs folded into a single gray line ("6 steps · Bash, Edit"). Long replies show a preview, and **Read all** opens the whole message. It opens at the newest message and follows new ones while the agent works.
+- **Replying:** **Speak** (watch mic, transcribed on the Mac by whisper.cpp, then reviewed before sending), **Type** (the watch keyboard), or **Quick** replies ("Continue", "Yes, go ahead", ...). Open questions and approvals show their choices as buttons.
+- It's an ordinary app, not a home screen, and it only uses the network while it's open.
+
+Replies go to **that exact conversation**, not whatever chat is open on the Mac:
+
+| App | How a reply is delivered |
+|---|---|
+| T3 Code | `t3 thread send <id>`. If the thread is busy, the reply becomes its next turn. |
+| Codex | `codex queue --thread <id> --resume` |
+| Claude Code | `claude -p --resume <id>`, run headless in the session's folder with the session's own permission mode. Refused while that session is mid-turn. |
+| Antigravity | `agy acp --app-data-dir antigravity` resumes any desktop conversation by id headlessly (even when the Mac is locked), with approval prompts forwarded to the watch. Falls back to typing into the newest chat if `agy` isn't installed. |
+
+Bridge endpoints (same token as the HUD): `GET /conversations`, `GET /conversation?id=&limit=`, `POST /conversation/reply {id, text}`. Answers to open questions use the HUD's `POST /action`.
+
+```bash
+cd watch-threads
+./gradlew assembleRelease
+adb -s <watch> install -r app/build/outputs/apk/release/app-release.apk
+```
+
+It finds the Mac over Bonjour, like the HUD. On Android 17 watches (Pixel Watch 5), allow **local network** access when the app asks.
+
+### Away from home (relay)
+
+At home the watch talks to the Mac directly. Anywhere else (another Wi-Fi, LTE, or the phone's Bluetooth link) it goes through a small Cloudflare relay in `relay/`:
+
+```
+Mac bridge ──outbound WebSocket──▶ Cloudflare Worker + Durable Object ◀──HTTPS── watch
+```
+
+- The Mac dials out, so nothing on the home network is opened to the internet.
+- The relay forwards only the wrist app's endpoints (conversations, replies, answers, images, speech-to-text). The desk HUD's "type into the front app" features are never reachable from the internet, and the bridge enforces the same allowlist itself.
+- Both sides must hold the bridge token. Cloudflare stores only its SHA-256, as the secret `TOKEN_SHA256`.
+- The watch learns the relay address from the Mac while it's home (response header `X-Relay-Url`), switches to the relay only when it can't *connect* directly (so nothing is ever sent twice), and quietly checks for home again every minute.
+- On the relay the watch releases its Wi-Fi hold, so Wear OS uses the cheapest link (usually the phone's Bluetooth).
+
+No phone companion app is needed. The watch already reaches the internet through the phone over Bluetooth when it's nearby, and over LTE or Wi-Fi when it isn't.
+
+Setup (already done for this Mac):
+
+```bash
+cd relay && wrangler deploy
+printf %s "$(tr -d '\n' < ~/.agenthud-bridge-token)" | shasum -a 256 | cut -d' ' -f1 | tr -d '\n' | wrangler secret put TOKEN_SHA256
+echo https://agent-threads-relay.<your-subdomain>.workers.dev > ~/.agenthud-relay-url   # then restart Agent HUD
+```
+
+The Agent HUD dashboard's `/health` shows the relay link (`relay.connected`). To test locally: put `TOKEN_SHA256=…` in `relay/.dev.vars` (git-ignored), run `wrangler dev`, and start a bridge with `AGENT_HUD_RELAY_URL=http://<mac-ip>:8787`.
 
 ## Firmware (experimental, not ready)
 

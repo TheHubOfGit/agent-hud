@@ -4,14 +4,18 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { WebSocketServer } from 'ws';
 
 import { AntigravityCollector } from './collectors/antigravity.mjs';
 import { ClaudeCollector } from './collectors/claude.mjs';
 import { CodexCollector } from './collectors/codex.mjs';
 import { CodexBarCollector } from './collectors/codexbar.mjs';
+import { ConversationStore, SourceBusyError, t3WindowTitle } from './conversations.mjs';
+import { pruneThumbnails, thumbnail } from './images.mjs';
+import { RelayLink } from './relay.mjs';
 import { T3CodeCollector } from './collectors/t3code.mjs';
-import { dispatchWatchAction } from './dispatch.mjs';
+import { dispatchWatchAction, forgetThread, guardAnswer, observeThreads, setAxHelper, setWindowTitleResolver } from './dispatch.mjs';
 import { LiveController } from './live.mjs';
 import { transcribeWavBuffer } from './stt.mjs';
 
@@ -46,6 +50,55 @@ const codex = new CodexCollector(() => scheduleBroadcast());
 const claude = new ClaudeCollector(() => scheduleBroadcast());
 const t3code = new T3CodeCollector(() => scheduleBroadcast());
 const live = new LiveController((state) => broadcastLiveState(state));
+setAxHelper(live);
+// Outbound link to the internet relay, if one is configured (see relay.mjs).
+const relayLink = new RelayLink({ port: PORT, token: AUTH_TOKEN });
+setInterval(pruneThumbnails, 60 * 60_000).unref();
+// Choices in T3 are only pressed when its front window shows that exact thread.
+setWindowTitleResolver((t) => (t.provider === 't3code' && t.rawId ? t3WindowTitle(t.rawId) : ''));
+// Conversation history and targeted replies for the wrist app (Agent Threads).
+const conversations = new ConversationStore({
+  getLiveThreads: () => [
+    ...t3code.getThreads(), ...antigravity.getThreads(), ...codex.getThreads(), ...claude.getThreads(),
+  ],
+  getTestThreads: () => [...customThreads.values()],
+  onTestReply: (id, text) => recordTestReply(id, 'reply', text),
+});
+
+/**
+ * The live thread an action is for. The HUD snapshot shows at most 6, but the wrist app can open
+ * any conversation, so fall back to everything the collectors know. Exact id match only: a stale id
+ * must never reach another session.
+ */
+function findActionThread(snapshot, threadId) {
+  if (!threadId) return null;
+  return snapshot.threads.find(t => t.id === threadId)
+    || customThreads.get(threadId)
+    || [...t3code.getThreads(), ...antigravity.getThreads(), ...codex.getThreads(), ...claude.getThreads()].find(t => t.id === threadId)
+    || null;
+}
+
+/** A reply or answer to a test thread: logged as the person's message, never sent anywhere. */
+function recordTestReply(id, action, text) {
+  const cur = customThreads.get(id);
+  if (!cur) return;
+  // stayWaiting: the thread keeps showing its question after an answer, like a collector that hasn't
+  // caught up yet (tests the bridge's late-answer guard).
+  if (cur.stayWaiting) return;
+  const now = Date.now();
+  cur.log = Array.isArray(cur.log) ? cur.log : [];
+  // Answers to a question aren't chat messages (real agents don't log them as one either); the
+  // watch shows the picked choice itself. Free-text replies are.
+  const isAnswer = action !== 'reply' || (Array.isArray(cur.options) && cur.options.includes(text));
+  if (!isAnswer) cur.log.push({ role: 'user', text, atMs: now });
+  cur.status = action === 'deny' ? 'idle' : 'running';
+  cur.step = text ? `Reply: ${text}` : `${action} sent`;
+  cur.prompt = null;
+  cur.options = [];
+  cur.kind = '';
+  cur.updatedAtMs = now;
+  scheduleBroadcast();
+}
 
 function broadcastLiveState(state) {
   if (!wss || wss.clients.size === 0) return;
@@ -115,6 +168,9 @@ function buildUnifiedSnapshot() {
     }
     merged.set(id, t);
   }
+
+  // Answered questions are forgotten once their thread stops waiting (see observeThreads).
+  observeThreads([...merged.values()]);
 
   // Only sessions touched in the last 30 minutes are shown, capped at 6. Anything waiting on
   // the user or erroring is always kept; the rest are ranked by most recent interaction, and the
@@ -232,9 +288,39 @@ function readRawBody(req, limitBytes = 8 * 1024 * 1024) {
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => {
+      const buf = Buffer.concat(chunks);
+      if (/gzip/i.test(String(req.headers['content-encoding'] || ''))) {
+        try {
+          resolve(zlib.gunzipSync(buf, { maxOutputLength: 12 * 1024 * 1024 }));
+        } catch {
+          reject(new Error('Invalid compressed audio'));
+        }
+        return;
+      }
+      resolve(buf);
+    });
     req.on('error', reject);
   });
+}
+
+/**
+ * Sends a JSON response with a weak ETag computed over [dataObj] (excluding serverTimeMs so
+ * unchanged polls return 304 Not Modified with 0 body bytes — huge win over Bluetooth).
+ */
+function sendJsonWithEtag(req, res, dataObj) {
+  const stable = JSON.stringify(dataObj);
+  const etag = `W/"${crypto.createHash('sha256').update(stable).digest('hex').slice(0, 16)}"`;
+  res.setHeader('ETag', etag);
+  res.setHeader('Cache-Control', 'no-cache');
+  const inm = String(req.headers['if-none-match'] || '').trim();
+  if (inm && inm === etag) {
+    res.writeHead(304);
+    res.end();
+    return;
+  }
+  res.writeHead(200);
+  res.end(`{"serverTimeMs":${Date.now()},${stable.slice(1)}`);
 }
 
 function tokenMatches(candidate) {
@@ -243,28 +329,51 @@ function tokenMatches(candidate) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+// What a request that came through the internet relay may use (the relay forwards only these too).
+const RELAY_ALLOWED = new Set([
+  'GET /conversations', 'GET /conversation', 'POST /conversation/reply', 'POST /action', 'GET /image', 'POST /voice-transcribe',
+]);
+
+/** Arrived through the relay: it reaches us from loopback, but must never get loopback's trust. */
+function isRelayed(req) {
+  return Boolean(req.headers['x-hud-relayed']);
+}
+
 function isAuthorized(req, urlObj) {
   // Browsers always send Origin on cross-site fetches and WebSocket upgrades; the watch, hooks
   // and the Mac app never do. Refusing any Origin stops a web page (or DNS rebinding) from
   // reading snapshots or typing into apps through the loopback trust below.
   if (req.headers.origin) return false;
+  if (isRelayed(req)) {
+    // Token in the header, and only the wrist app's endpoints.
+    if (!RELAY_ALLOWED.has(`${req.method} ${urlObj.pathname}`)) return false;
+    return tokenMatches(req.headers['x-hud-token'] || '');
+  }
   // Loopback requests (local CLI hooks, the Mac app, curl tests) are trusted.
   const ip = req.socket.remoteAddress || '';
   if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return true;
   const headerToken = req.headers['x-hud-token'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-  const queryToken = urlObj.searchParams.get('token') || '';
+  // The desk HUD's WebSocket can't send headers, so only /ws may carry the token in its URL; HTTP calls
+  // must use the header (URLs end up in logs and proxies).
+  const queryToken = urlObj.pathname === '/ws' ? (urlObj.searchParams.get('token') || '') : '';
   return tokenMatches(headerToken) || tokenMatches(queryToken);
 }
 
 // The Live debug endpoints click and read UI in the front Mac app, so they are for local use only:
 // a watch (or anything else on the LAN) holding the token cannot call them.
 function isLoopbackReq(req) {
+  if (isRelayed(req)) return false;
   const ip = req.socket.remoteAddress || '';
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
 const server = http.createServer(async (req, res) => {
-  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  let urlObj;
+  try {
+    urlObj = new URL(req.url || '/', 'http://localhost'); // never parse the Host header: it can be anything
+  } catch {
+    res.writeHead?.(400); res.end?.(); return;
+  }
   res.setHeader('Content-Type', 'application/json');
 
   if (!isAuthorized(req, urlObj)) {
@@ -272,6 +381,10 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
   }
+  // Direct (home network) answers tell the watch where the relay is, so it can switch to it
+  // by itself when it leaves home.
+  const relayStatus = relayLink.status();
+  if (!isRelayed(req) && relayStatus.configured) res.setHeader('X-Relay-Url', relayStatus.url);
 
   try {
     // Liveness/health for the Mac app and scripts (small, no thread contents).
@@ -286,6 +399,7 @@ const server = http.createServer(async (req, res) => {
         startedAtMs: BRIDGE_STARTED_AT,
         uptimeSec: Math.round((Date.now() - BRIDGE_STARTED_AT) / 1000),
         mdns: Boolean(dnsSdProc && dnsSdProc.exitCode === null),
+        relay: relayLink.status(),
         clients: [...wss.clients].map(c => ({ ip: c.remoteIp || '', connectedAtMs: c.connectedAtMs || 0 })),
         threads: snap.threads.length,
         waiting: snap.approvalQueue.length,
@@ -314,9 +428,22 @@ const server = http.createServer(async (req, res) => {
       const now = Date.now();
       if (body.clear) {
         customThreads.delete(id);
+        forgetThread(id);
       } else {
         const status = body.status || 'running';
+        const prevLog = customThreads.get(id)?.log || [];
+        const log = Array.isArray(body.messages)
+          ? body.messages.filter(m => m && m.text).map((m, i) => ({
+            role: m.role === 'user' ? 'user' : m.role === 'activity' ? 'activity' : 'assistant',
+            text: String(m.text).slice(0, 8000),
+            atMs: Number(m.atMs) || now - (body.messages.length - i) * 60_000,
+          }))
+          : prevLog;
         customThreads.set(id, {
+          log,
+          answerDelayMs: Number(body.answerDelayMs) || 0,
+          stayWaiting: Boolean(body.stayWaiting),
+          failAnswer: Boolean(body.failAnswer),
           id,
           rawId: id,
           provider: body.provider || 'terminal',
@@ -356,42 +483,97 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && urlObj.pathname === '/action') {
       const body = await readJsonBody(req);
       const snapshot = buildUnifiedSnapshot();
-      const thread = snapshot.threads.find(t => t.id === body.threadId);  // never guess: a stale id must not reach another session
+      const thread = findActionThread(snapshot, body.threadId);
       // Webhook/test threads have no app behind them: resolve them here, never type anywhere.
       let result;
       try {
-        result = thread && customThreads.has(thread.id)
-          ? { ok: true, method: 'webhook', message: 'Recorded' }
+        // Test threads can mimic a real app: answerDelayMs (how long the answer takes to land) and
+        // failAnswer (the answer is refused), to try the watch's sending and failure states.
+        const test = thread && customThreads.get(thread.id);
+        const acpPerm = !test ? conversations.resolvePermission(body.threadId, body.action, body.text) : null;
+        result = acpPerm || (test
+          ? await guardAnswer(thread, body.action, body.text, async () => {
+            if (test.answerDelayMs) await new Promise(r => setTimeout(r, Math.min(10_000, test.answerDelayMs)));
+            return test.failAnswer ? { ok: false, method: 'webhook', message: "Couldn't answer (test failure)" } : { ok: true, method: 'webhook', message: 'Recorded' };
+          })
           : await dispatchWatchAction({
             thread,
             action: body.action,
             text: body.text,
             claudeCollector: claude,
-          });
+          }));
       } catch (err) {
         result = { ok: false, message: err.message || 'Action failed' };
       }
       // Log the outcome (never the reply text itself) so failed sends are diagnosable.
       console.log(`[action] ${body.action || '?'} -> ${thread?.id || body.threadId || '?'}: ${result.ok ? 'ok' : 'FAILED'}${result.method ? ` via ${result.method}` : ''}${result.message ? ` (${result.message})` : ''}${body.text ? ` [${String(body.text).length} chars]` : ''}`);
       // If it was a custom webhook waiting item, mark resolved cleanly
-      if (thread && customThreads.has(thread.id)) {
-        const cur = customThreads.get(thread.id);
-        cur.status = body.action === 'deny' ? 'idle' : 'running';
-        cur.step = body.text ? `Reply: ${body.text}` : `${body.action} sent`;
-        cur.prompt = null;
-        cur.options = [];
-        cur.updatedAtMs = Date.now();
-        scheduleBroadcast();
-      }
+      if (thread && customThreads.has(thread.id) && result.ok) recordTestReply(thread.id, body.action, body.text);
       res.writeHead(result.ok ? 200 : 400);
       res.end(JSON.stringify(result));
       return;
     }
 
-    // Watch -> Mac raw WAV audio transcription (returns text for quick preview before Send)
+    // Agent Threads (wrist app): recent conversations across providers.
+    if (req.method === 'GET' && urlObj.pathname === '/conversations') {
+      const limit = Number(urlObj.searchParams.get('limit')) || 40;
+      sendJsonWithEtag(req, res, { conversations: conversations.list(limit) });
+      return;
+    }
+
+    // One conversation's messages (newest last) plus its live state.
+    if (req.method === 'GET' && urlObj.pathname === '/conversation') {
+      let data;
+      try {
+        data = conversations.get(urlObj.searchParams.get('id'), urlObj.searchParams.get('limit'));
+      } catch (err) {
+        // Busy (a provider is mid-write): say so, so the watch keeps what it shows instead of blanking it.
+        res.writeHead(err instanceof SourceBusyError ? 503 : 500);
+        res.end(JSON.stringify({ error: err instanceof SourceBusyError ? 'Busy, try again' : 'Read failed' }));
+        return;
+      }
+      if (!data) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: 'Unknown conversation' }));
+        return;
+      }
+      sendJsonWithEtag(req, res, data);
+      return;
+    }
+
+    // An image from a conversation the watch has read, as a small JPEG (?t=<token>&w=<pixels>).
+    if (req.method === 'GET' && urlObj.pathname === '/image') {
+      try {
+        const file = await thumbnail(urlObj.searchParams.get('t'), Number(urlObj.searchParams.get('w')) || 320);
+        const buf = fs.readFileSync(file);
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': buf.length, 'Cache-Control': 'private, max-age=86400' });
+        res.end(buf);
+      } catch (err) {
+        res.writeHead(err.status || 500);
+        res.end(JSON.stringify({ error: err.status === 404 ? 'Unknown image' : err.status === 410 ? 'Image is gone' : "Couldn't make a preview" }));
+      }
+      return;
+    }
+
+    // A reply sent to exactly this conversation (never to whatever chat is open on the Mac).
+    if (req.method === 'POST' && urlObj.pathname === '/conversation/reply') {
+      const body = await readJsonBody(req);
+      let result;
+      try {
+        result = await conversations.reply(body.id, body.text, typeof body.clientId === 'string' ? body.clientId.slice(0, 64) : '');
+      } catch (err) {
+        result = { ok: false, message: err.message || 'Send failed' };
+      }
+      console.log(`[reply] -> ${body.id || '?'}: ${result.ok ? 'ok' : 'FAILED'}${result.method ? ` via ${result.method}` : ''}${result.message ? ` (${result.message})` : ''} [${String(body.text || '').length} chars]`);
+      res.writeHead(result.ok ? 200 : 400);
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    // Watch -> Mac raw WAV (or compressed µ-law) audio transcription (returns text for quick preview before Send)
     if (req.method === 'POST' && urlObj.pathname === '/voice-transcribe') {
-      const wavBuf = await readRawBody(req);
-      const transcript = await transcribeWavBuffer(wavBuf);
+      const audioBuf = await readRawBody(req);
+      const transcript = await transcribeWavBuffer(audioBuf, req.headers['content-type'] || 'audio/wav');
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, text: transcript }));
       return;
@@ -468,6 +650,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Local-only: where would a reply be typed in this app? Finds the box and reports; types nothing.
+    if (req.method === 'GET' && urlObj.pathname === '/live/debug-compose' && isLoopbackReq(req)) {
+      const info = await live.composeIn(urlObj.searchParams.get('app') || '', urlObj.searchParams.get('title') || '', '',
+        { anyBox: urlObj.searchParams.get('anyBox') === '1', dryRun: true });
+      res.writeHead(200);
+      res.end(JSON.stringify(info, null, 2));
+      return;
+    }
+
     if (req.method === 'GET' && urlObj.pathname === '/live/debug-ax' && isLoopbackReq(req)) {
       const targetApp = urlObj.searchParams.get('app') || '';
       const info = await live.debugAx(targetApp);
@@ -514,7 +705,12 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
 server.on('upgrade', (req, socket, head) => {
-  const urlObj = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  let urlObj;
+  try {
+    urlObj = new URL(req.url || '/', 'http://localhost');
+  } catch {
+    socket.destroy(); return;
+  }
   if (urlObj.pathname !== '/ws' || !isAuthorized(req, urlObj)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -570,17 +766,24 @@ wss.on('connection', (ws, req) => {
         }
       } else if (msg.type === 'action') {
         const snapshot = buildUnifiedSnapshot();
-        const thread = snapshot.threads.find(t => t.id === msg.threadId);  // never guess: a stale id must not reach another session
+        const thread = findActionThread(snapshot, msg.threadId);
         let result;
         try {
-          result = thread && customThreads.has(thread.id)
-          ? { ok: true, method: 'webhook', message: 'Recorded' }
+          // Test threads can mimic a real app: answerDelayMs (how long the answer takes to land) and
+        // failAnswer (the answer is refused), to try the watch's sending and failure states.
+        const test = thread && customThreads.get(thread.id);
+        const acpPerm = !test ? conversations.resolvePermission(msg.threadId, msg.action, msg.text) : null;
+        result = acpPerm || (test
+          ? await guardAnswer(thread, msg.action, msg.text, async () => {
+            if (test.answerDelayMs) await new Promise(r => setTimeout(r, Math.min(10_000, test.answerDelayMs)));
+            return test.failAnswer ? { ok: false, method: 'webhook', message: "Couldn't answer (test failure)" } : { ok: true, method: 'webhook', message: 'Recorded' };
+          })
           : await dispatchWatchAction({
           thread,
           action: msg.action,
           text: msg.text,
           claudeCollector: claude,
-        });
+        }));
         } catch (err) {
           // e.g. no Accessibility permission, Mac locked, osascript timeout: tell the watch.
           result = { ok: false, message: err.message || 'Action failed' };
@@ -684,6 +887,7 @@ server.on('error', (err) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
+  relayLink.start();
   codexBar.start();
   antigravity.start();
   codex.start();

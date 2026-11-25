@@ -107,6 +107,29 @@ export function readHubTitles(file = HUB_SUMMARIES) {
   }
 }
 
+/**
+ * Whether an Antigravity conversation is mid-turn, read from the newest row of its live steps table.
+ * Exported so ConversationStore can check any conversation (even outside the collector's top 6).
+ */
+export function antigravityDbTurnState(convId) {
+  const file = path.join(CONV_DIR, `${convId}.db`);
+  if (!fs.existsSync(file)) return null;
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true, timeout: 500 });
+    const row = db.prepare('SELECT step_type, status FROM steps ORDER BY idx DESC LIMIT 1').get();
+    if (!row) return null;
+    if (row.status !== STATUS_DONE && row.status !== STATUS_CANCELLED) return 'working';
+    if (row.step_type === STEP_USER_INPUT) return 'working';
+    if (row.step_type === STEP_PLANNER) return 'idle';
+    return row.status === STATUS_CANCELLED ? 'idle' : 'working';
+  } catch {
+    return null;
+  } finally {
+    try { db?.close(); } catch {}
+  }
+}
+
 export class AntigravityCollector {
   constructor(onChange) {
     this.onChange = onChange;
@@ -363,7 +386,7 @@ export class AntigravityCollector {
             if (askCall) {
               const q0 = parseAskQuestions(askCall)[0];
               const choices = (Array.isArray(q0?.options) ? q0.options : [])
-                .map(o => String(typeof o === 'string' ? o : o?.label || '').trim().slice(0, 40))
+                .map(o => String(typeof o === 'string' ? o : o?.label || '').trim().slice(0, 200))
                 .filter(Boolean)
                 .slice(0, 4);
               cur.status = 'waiting_input';

@@ -205,6 +205,21 @@ export class LiveController {
     return this._send(payload, 5000);
   }
 
+  /** Agent Threads: press the button labelled [label] in [appName] (answer an open question). */
+  pressChoice(appName, label, windowTitle = '') {
+    return this._send({ cmd: 'press_choice', app: String(appName || ''), label: String(label || ''), windowTitle: String(windowTitle || '') }, 15000);
+  }
+
+  /** Agent Threads: type and send [text] in [appName] if its front window is exactly [windowTitle]. */
+  /** opts.anyBox: no window-title check, use the lowest wide text box (apps without titles per chat).
+   *  opts.dryRun: find the box and report on it, change nothing. */
+  composeIn(appName, windowTitle, text, opts = {}) {
+    return this._send({
+      cmd: 'compose_in', app: String(appName || ''), windowTitle: String(windowTitle || ''), text: String(text || ''),
+      anyBox: Boolean(opts.anyBox), dryRun: Boolean(opts.dryRun),
+    }, 15000);
+  }
+
   debugAx(appName = '') {
     return this._send({ cmd: 'debug_ax', app: appName }, 6000);
   }

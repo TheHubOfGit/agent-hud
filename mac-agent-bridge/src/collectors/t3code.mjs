@@ -91,6 +91,7 @@ export class T3CodeCollector {
                  0 AS pending_approval_count, 0 AS pending_user_input_count, 0 AS has_actionable_proposed_plan
           FROM orchestration_v2_projection_threads
           WHERE deleted_at IS NULL AND archived_at IS NULL
+            AND COALESCE(json_extract(payload_json, '$.lineage.relationshipToParent'), '') != 'subagent'
           ORDER BY updated_at DESC
           LIMIT 10
         `).all();
@@ -113,11 +114,13 @@ export class T3CodeCollector {
         // Check active run
         let activeRun = null;
         try {
+          // The run in progress, if any; otherwise the newest. Messages sent while a turn runs are
+          // queued as newer runs, so "newest" alone made a busy thread with follow-ups look idle.
           activeRun = db.prepare(`
             SELECT run_id, provider, status, requested_at, completed_at
             FROM orchestration_v2_projection_runs
             WHERE thread_id = ?
-            ORDER BY ordinal DESC
+            ORDER BY (status IN ('running', 'in_progress', 'inProgress', 'streaming')) DESC, ordinal DESC
             LIMIT 1
           `).get(r.thread_id);
         } catch {}
@@ -138,6 +141,8 @@ export class T3CodeCollector {
         let step = 'Standby';
         let prompt = null;
         let options = [];
+        let kind = '';
+        let multiSelect = false;
 
         if (pendingReq || r.pending_approval_count > 0 || r.pending_user_input_count > 0) {
           status = r.pending_user_input_count > 0 || (pendingReq?.kind || '').toLowerCase().includes('input')
@@ -146,15 +151,23 @@ export class T3CodeCollector {
           try {
             const p = pendingReq ? JSON.parse(pendingReq.payload_json) : {};
             prompt = p.question || p.command || p.message || p.title || p.description || 'Action required in T3 Code';
-            step = String(prompt).slice(0, 240);
             if (Array.isArray(p.options)) {
               options = p.options.map(o => typeof o === 'string' ? o : (o.label || o.title || '')).filter(Boolean).slice(0, 4);
             }
+            // A question (user_input) keeps its text and choices on the tool call that asked it,
+            // matched by the provider's own id (e.g. Claude's toolu_… for AskUserQuestion).
+            const q = this.questionFor(db, r.thread_id, p?.nativeRequestRef?.nativeId);
+            if (q) {
+              prompt = q.question;
+              options = q.options;
+              kind = options.length ? 'choice' : 'input';
+              multiSelect = q.multiSelect;
+            }
           } catch {
             prompt = 'Action required in T3 Code';
-            step = prompt;
           }
-          if (options.length === 0) options = ['Proceed', 'Deny'];
+          step = String(prompt).slice(0, 240);
+          if (options.length === 0) options = status === 'waiting_input' ? ['Proceed'] : ['Proceed', 'Deny'];
         } else if (r.has_actionable_proposed_plan > 0) {
           status = 'waiting_approval';
           prompt = 'Proposed plan ready to proceed';
@@ -189,6 +202,8 @@ export class T3CodeCollector {
           updatedAtMs: updatedMs,
           color: status.startsWith('waiting') ? '#fdd663' : status === 'error' ? '#f28b82' : '#c58af9',
           canReply: true,
+          kind: status.startsWith('waiting') ? (kind || (status === 'waiting_input' ? 'input' : '')) : '',
+          multiSelect,
         });
       }
 
@@ -205,6 +220,30 @@ export class T3CodeCollector {
       // SQLite busy — retry next tick
     } finally {
       try { db?.close(); } catch {}
+    }
+  }
+
+  /** The question an open user_input request is asking, from the tool item with the same native id. */
+  questionFor(db, threadId, nativeId) {
+    if (!nativeId) return null;
+    try {
+      const row = db.prepare(`
+        SELECT payload_json FROM orchestration_v2_projection_turn_items
+        WHERE thread_id = ? AND json_extract(payload_json, '$.nativeItemRef.nativeId') = ?
+          AND json_extract(payload_json, '$.input.questions') IS NOT NULL
+        LIMIT 1`).get(threadId, nativeId);
+      const q = row ? JSON.parse(row.payload_json)?.input?.questions?.[0] : null;
+      if (!q?.question) return null;
+      return {
+        question: String(q.question),
+        options: (Array.isArray(q.options) ? q.options : [])
+          .map(o => String(typeof o === 'string' ? o : o?.label || '').trim().slice(0, 200))
+          .filter(Boolean)
+          .slice(0, 4),
+        multiSelect: Boolean(q.multiSelect),
+      };
+    } catch {
+      return null;
     }
   }
 
