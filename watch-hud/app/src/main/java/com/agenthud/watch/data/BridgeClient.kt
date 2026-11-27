@@ -1,6 +1,10 @@
 package com.agenthud.watch.data
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.Build
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import kotlinx.coroutines.CoroutineScope
@@ -69,10 +73,12 @@ class BridgeClient(
     // Bumped on every connect; callbacks from a replaced socket are ignored. Without this, cancelling
     // the old socket fired its onFailure, which flagged OFFLINE and killed the new socket 2.5s later.
     @Volatile private var connGen = 0
+    // Failed connects to the cached host in a row; discovery only starts after a few.
+    @Volatile private var failedAttempts = 0
 
     fun start() {
         stopped = false
-        startMdnsDiscovery()
+        if (activeHost.isBlank()) startMdnsDiscovery()
         if (activeHost.isNotBlank()) {
             connectTo(activeHost, activePort)
         } else {
@@ -92,7 +98,8 @@ class BridgeClient(
         webSocket?.cancel()
         webSocket = null
         stopMdnsDiscovery()
-        startMdnsDiscovery()
+        failedAttempts = 0
+        if (activeHost.isBlank()) startMdnsDiscovery()
         if (activeHost.isNotBlank()) {
             connectTo(activeHost, activePort)
         } else {
@@ -269,6 +276,8 @@ class BridgeClient(
                 if (gen != connGen) return
                 _connectionState.value = ConnectionState.CONNECTED
                 _lastSeenMs.value = System.currentTimeMillis()
+                failedAttempts = 0
+                stopMdnsDiscovery()
                 prefs.cachedHost = host
                 prefs.cachedPort = port
                 if (liveModeActive) {
@@ -315,7 +324,11 @@ class BridgeClient(
                 if (activeHost.isNotBlank()) {
                     connectTo(activeHost, activePort)
                 }
-                startMdnsDiscovery()
+                // Look the Mac up again only when the saved address keeps failing (its IP may
+                // have changed). Searching nonstop kept a local-network scan running for hours.
+                if (activeHost.isBlank() || ++failedAttempts >= 3) {
+                    if (discoveryListener == null) startMdnsDiscovery()
+                }
             }
         }
     }
@@ -439,6 +452,10 @@ class BridgeClient(
     private fun startMdnsDiscovery() {
         stopMdnsDiscovery()
         val mgr = context.getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
+        // Search only on Wi-Fi. Without a Wi-Fi network the watch routes through the phone's
+        // Bluetooth proxy, and on Android 17 the phone answers that search by popping a
+        // "Choose a device to connect" picker on the phone.
+        val wifi = wifiNetwork() ?: return
         nsdManager = mgr
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) {}
@@ -467,8 +484,21 @@ class BridgeClient(
         }
         discoveryListener = listener
         try {
-            mgr.discoverServices("_agenthud._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                mgr.discoverServices("_agenthud._tcp.", NsdManager.PROTOCOL_DNS_SD, wifi, { it.run() }, listener)
+            } else {
+                mgr.discoverServices("_agenthud._tcp.", NsdManager.PROTOCOL_DNS_SD, listener)
+            }
         } catch (_: Throwable) {
+            discoveryListener = null
+        }
+    }
+
+    private fun wifiNetwork(): Network? {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return null
+        @Suppress("DEPRECATION")
+        return cm.allNetworks.firstOrNull {
+            cm.getNetworkCapabilities(it)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
         }
     }
 
